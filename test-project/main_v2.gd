@@ -6,24 +6,34 @@ extends Node3D
 const SPAWN_INTERVAL := 0.35
 const KILL_Y := -2.0
 const MAX_CUBES := 25
-const GLOBAL_AUDIO_RATE_HZ := 6.0
+const GLOBAL_AUDIO_RATE_HZ := 8.0
 const SAMPLE_RATE := 44100.0
 const FORWARD_Z := -1.3
 const SPAWN_HEIGHT := 1.6
 const PLATE_HEIGHT := 0.55
+
+# Fire-plasma palette — warm tones + contrast pops for mixed-mode variety.
+const CUBE_PALETTE := [
+	Color(1.00, 0.55, 0.10),  # classic orange
+	Color(1.00, 0.80, 0.00),  # amber / gold
+	Color(1.00, 0.95, 0.30),  # yellow
+	Color(1.00, 0.22, 0.04),  # deep red-orange
+	Color(1.00, 0.97, 0.88),  # white-hot
+	Color(0.75, 0.28, 1.00),  # electric violet
+	Color(0.20, 0.82, 1.00),  # ice blue
+	Color(1.00, 0.38, 0.70),  # hot pink
+]
 
 var _xr_ok := false
 var _frame_count := 0
 var _log_timer := 0.0
 var _spawn_timer := 0.0
 var _last_global_audio := 0.0
-var _cube_mesh: BoxMesh
-var _cube_material: StandardMaterial3D
 var _physics_material: PhysicsMaterial
-var _particle_material: ParticleProcessMaterial
-var _particle_mesh: QuadMesh
 var _shared_audio: AudioStreamPlayer3D
 var _audio_playback: AudioStreamGeneratorPlayback
+var _flash_light: OmniLight3D
+var _flash_energy := 0.0
 var _active_cubes: Array = []
 var _collision_count := 0
 
@@ -44,41 +54,18 @@ func _ready():
 	_write_log("Static scene built; audio ready")
 
 func _build_resources():
-	_cube_mesh = BoxMesh.new()
-	_cube_mesh.size = Vector3(0.09, 0.09, 0.09)
-
-	_cube_material = StandardMaterial3D.new()
-	_cube_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_cube_material.albedo_color = Color(1.0, 0.55, 0.1, 1.0)
-	_cube_material.emission_enabled = true
-	_cube_material.emission = Color(1.0, 0.65, 0.15, 1.0)
-	_cube_material.emission_energy_multiplier = 1.5
-
 	_physics_material = PhysicsMaterial.new()
-	_physics_material.bounce = 0.35
-	_physics_material.friction = 0.25
+	_physics_material.bounce = 0.38
+	_physics_material.friction = 0.22
 
-	# Shared particle process material — all cube trails reference this instance.
-	_particle_material = ParticleProcessMaterial.new()
-	_particle_material.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
-	_particle_material.emission_sphere_radius = 0.02
-	_particle_material.initial_velocity_min = 0.05
-	_particle_material.initial_velocity_max = 0.2
-	_particle_material.gravity = Vector3(0.0, -0.3, 0.0)
-	_particle_material.scale_min = 0.3
-	_particle_material.scale_max = 0.7
-	_particle_material.color = Color(1.0, 0.65, 0.15, 0.9)
-
-	_particle_mesh = QuadMesh.new()
-	_particle_mesh.size = Vector2(0.018, 0.018)
-	var pm := StandardMaterial3D.new()
-	pm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	pm.albedo_color = Color(1.0, 0.7, 0.2, 0.85)
-	pm.emission_enabled = true
-	pm.emission = Color(1.0, 0.6, 0.1, 1.0)
-	pm.emission_energy_multiplier = 2.0
-	pm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_particle_mesh.material = pm
+	# Collision flash light — warm-white point light repositioned on each impact.
+	# Illuminates the plates/wall (PER_PIXEL shading); doesn't affect UNSHADED cubes.
+	_flash_light = OmniLight3D.new()
+	_flash_light.light_color = Color(1.0, 0.90, 0.60)
+	_flash_light.light_energy = 0.0
+	_flash_light.omni_range = 1.2
+	_flash_light.omni_attenuation = 2.0
+	add_child(_flash_light)
 
 func _build_plate(y: float, z: float, x_rot_deg: float) -> void:
 	var plate := StaticBody3D.new()
@@ -93,7 +80,7 @@ func _build_plate(y: float, z: float, x_rot_deg: float) -> void:
 	mi.mesh = bm
 	var plate_mat := StandardMaterial3D.new()
 	plate_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	plate_mat.albedo_color = Color(0.35, 0.4, 0.55, 1.0)
+	plate_mat.albedo_color = Color(0.35, 0.40, 0.55, 1.0)
 	mi.material_override = plate_mat
 	plate.add_child(mi)
 	var cs := CollisionShape3D.new()
@@ -122,7 +109,7 @@ func _build_static_scene():
 	wmi.mesh = wbm
 	var wmat := StandardMaterial3D.new()
 	wmat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	wmat.albedo_color = Color(0.25, 0.45, 0.7, 1.0)
+	wmat.albedo_color = Color(0.25, 0.45, 0.70, 1.0)
 	wmi.material_override = wmat
 	wall.add_child(wmi)
 	var wcs := CollisionShape3D.new()
@@ -156,7 +143,6 @@ func _setup_audio():
 	_shared_audio.play()
 	_audio_playback = _shared_audio.get_stream_playback()
 
-
 func _process(delta: float):
 	_frame_count += 1
 	_log_timer += delta
@@ -168,34 +154,76 @@ func _process(delta: float):
 	if _log_timer >= 5.0:
 		_log_timer = 0.0
 		_append_log("frames=%d active=%d collisions=%d" % [_frame_count, _active_cubes.size(), _collision_count])
-
+	# Decay collision flash light.
+	if _flash_energy > 0.0:
+		_flash_energy = move_toward(_flash_energy, 0.0, delta * 22.0)
+		_flash_light.light_energy = _flash_energy
 
 func _spawn_cube():
+	var size: float = randf_range(0.06, 0.12)
+	var color: Color = CUBE_PALETTE[randi() % CUBE_PALETTE.size()]
+	var emission_e: float = randf_range(1.2, 3.5)
+
 	var cube := RigidBody3D.new()
 	cube.physics_material_override = _physics_material
-	cube.mass = 0.2
-	cube.linear_damp = 0.15
-	cube.angular_damp = 0.35
+	# Scale mass with volume so small cubes are bouncier, big ones feel heavy.
+	cube.mass = max(0.08, size * size * size * 400.0)
+	cube.linear_damp = 0.12
+	cube.angular_damp = 0.30
 	cube.contact_monitor = true
-	cube.max_contacts_reported = 2
+	cube.max_contacts_reported = 3
+
+	# Per-cube mesh + material (unique size and colour).
 	var mi := MeshInstance3D.new()
-	mi.mesh = _cube_mesh
-	mi.material_override = _cube_material
+	var bm := BoxMesh.new()
+	bm.size = Vector3(size, size, size)
+	mi.mesh = bm
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = emission_e
+	mi.material_override = mat
 	cube.add_child(mi)
+
+	# Per-cube collision shape matching mesh size.
 	var cs := CollisionShape3D.new()
 	var sh := BoxShape3D.new()
-	sh.size = Vector3(0.09, 0.09, 0.09)
+	sh.size = Vector3(size, size, size)
 	cs.shape = sh
 	cube.add_child(cs)
-	# Particle trail — 8 quads, 0.3s lifetime, shared material/mesh.
+
+	# Per-cube particle trail — colour-matched, 12 quads, 0.4 s lifetime.
+	var pmat := StandardMaterial3D.new()
+	pmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	pmat.albedo_color = Color(color.r, color.g, color.b, 0.85)
+	pmat.emission_enabled = true
+	pmat.emission = color
+	pmat.emission_energy_multiplier = 2.2
+	pmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var pquad := QuadMesh.new()
+	pquad.size = Vector2(0.022, 0.022)
+	pquad.material = pmat
+
+	var proc_mat := ParticleProcessMaterial.new()
+	proc_mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	proc_mat.emission_sphere_radius = size * 0.18
+	proc_mat.initial_velocity_min = 0.06
+	proc_mat.initial_velocity_max = 0.32
+	proc_mat.gravity = Vector3(0.0, -0.35, 0.0)
+	proc_mat.scale_min = 0.25
+	proc_mat.scale_max = 0.90
+
 	var particles := GPUParticles3D.new()
-	particles.amount = 8
-	particles.lifetime = 0.3
+	particles.amount = 12
+	particles.lifetime = 0.4
 	particles.explosiveness = 0.0
-	particles.process_material = _particle_material
-	particles.draw_pass_1 = _particle_mesh
+	particles.process_material = proc_mat
+	particles.draw_pass_1 = pquad
 	particles.visibility_aabb = AABB(Vector3(-1.0, -1.0, -1.0), Vector3(2.0, 2.0, 2.0))
 	cube.add_child(particles)
+
 	cube.position = Vector3(
 		randf_range(-0.15, 0.15),
 		SPAWN_HEIGHT,
@@ -206,45 +234,58 @@ func _spawn_cube():
 		randf_range(-2.5, 2.5),
 		randf_range(-2.5, 2.5)
 	)
-	# Bind cube so the collision handler knows which node to position audio at.
 	cube.body_entered.connect(_on_cube_collision.bind(cube))
 	add_child(cube)
 	_active_cubes.append(cube)
 
-func _on_cube_collision(_other_body, cube: RigidBody3D):
+func _on_cube_collision(other_body: Node3D, cube: RigidBody3D):
 	_collision_count += 1
-	var t = Time.get_ticks_msec() / 1000.0
+	var t := Time.get_ticks_msec() / 1000.0
 	if t - _last_global_audio < 1.0 / GLOBAL_AUDIO_RATE_HZ:
 		return
 	_last_global_audio = t
 	_shared_audio.position = cube.global_position
-	_push_chime(440.0 + randf_range(-60.0, 220.0), 0.08)
+	# Flash light at impact point — illuminates plates/wall (PER_PIXEL shading only).
+	_flash_light.position = cube.global_position
+	_flash_energy = 3.5
+	if other_body is RigidBody3D:
+		# Cube-on-cube: high-frequency bright tink.
+		_push_chime(randf_range(700.0, 1500.0), 0.036, false)
+	else:
+		# Cube-on-plate or wall: resonant chime with octave harmonic.
+		_push_chime(randf_range(260.0, 700.0), 0.10, true)
 
-func _push_chime(freq: float, duration: float):
+func _push_chime(freq: float, duration: float, harmonic: bool):
 	if _audio_playback == null:
 		return
-	var n = int(SAMPLE_RATE * duration)
-	var to_fill = min(n, _audio_playback.get_frames_available())
+	var n := int(SAMPLE_RATE * duration)
+	var to_fill := min(n, _audio_playback.get_frames_available())
 	for i in range(to_fill):
-		var t = float(i) / SAMPLE_RATE
-		var env = sin(PI * t / duration)
-		var s = sin(TAU * freq * t) * env * 0.55
+		var t := float(i) / SAMPLE_RATE
+		var env := sin(PI * t / duration)
+		var s: float
+		if harmonic:
+			# Plate hit: fundamental + octave for a richer, resonant chime.
+			s = (sin(TAU * freq * t) * 0.50 + sin(TAU * freq * 2.0 * t) * 0.18) * env
+		else:
+			# Cube hit: clean sine tink — short, bright, higher register.
+			s = sin(TAU * freq * t) * env * 0.42
 		_audio_playback.push_frame(Vector2(s, s))
 
-func _on_kill_entered(body):
+func _on_kill_entered(body: Node3D):
 	if body is RigidBody3D:
 		_active_cubes.erase(body)
 		body.queue_free()
 
 func _write_log(msg: String):
-	var f = FileAccess.open("user://xr_diag.txt", FileAccess.WRITE)
+	var f := FileAccess.open("user://xr_diag.txt", FileAccess.WRITE)
 	if f:
 		f.store_string(msg + "\n")
 		f.close()
 		print("[Cascade] " + msg)
 
 func _append_log(msg: String):
-	var f = FileAccess.open("user://xr_diag.txt", FileAccess.READ_WRITE)
+	var f := FileAccess.open("user://xr_diag.txt", FileAccess.READ_WRITE)
 	if f == null:
 		f = FileAccess.open("user://xr_diag.txt", FileAccess.WRITE)
 	if f:
