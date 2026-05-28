@@ -11,7 +11,6 @@ const SAMPLE_RATE := 44100.0
 const FORWARD_Z := -1.3
 const SPAWN_HEIGHT := 1.6
 const PLATE_HEIGHT := 0.55
-const POOL_SIZE := 4
 
 var _xr_ok := false
 var _frame_count := 0
@@ -23,8 +22,8 @@ var _cube_material: StandardMaterial3D
 var _physics_material: PhysicsMaterial
 var _particle_material: ParticleProcessMaterial
 var _particle_mesh: QuadMesh
-var _audio_pool: Array = []
-var _audio_pool_index := 0
+var _shared_audio: AudioStreamPlayer3D
+var _audio_playback: AudioStreamGeneratorPlayback
 var _active_cubes: Array = []
 var _collision_count := 0
 
@@ -145,18 +144,17 @@ func _build_static_scene():
 	add_child(killer)
 
 func _setup_audio():
-	for i in range(POOL_SIZE):
-		var player := AudioStreamPlayer3D.new()
-		var gen := AudioStreamGenerator.new()
-		gen.mix_rate = SAMPLE_RATE
-		gen.buffer_length = 0.3
-		player.stream = gen
-		player.volume_db = -3.0
-		player.max_distance = 5.0
-		player.unit_size = 1.0
-		add_child(player)
-		player.play()
-		_audio_pool.append(player)
+	_shared_audio = AudioStreamPlayer3D.new()
+	var gen := AudioStreamGenerator.new()
+	gen.mix_rate = SAMPLE_RATE
+	gen.buffer_length = 0.3
+	_shared_audio.stream = gen
+	_shared_audio.volume_db = -3.0
+	_shared_audio.max_distance = 5.0
+	_shared_audio.unit_size = 1.0
+	add_child(_shared_audio)
+	_shared_audio.play()
+	_audio_playback = _shared_audio.get_stream_playback()
 
 func _process(delta: float):
 	_frame_count += 1
@@ -217,23 +215,19 @@ func _on_cube_collision(_other_body, cube: RigidBody3D):
 	if t - _last_global_audio < 1.0 / GLOBAL_AUDIO_RATE_HZ:
 		return
 	_last_global_audio = t
-	# Round-robin through the audio pool, repositioned to the colliding cube.
-	var player: AudioStreamPlayer3D = _audio_pool[_audio_pool_index % POOL_SIZE]
-	_audio_pool_index += 1
-	player.position = cube.global_position
-	_push_chime(player, 440.0 + randf_range(-60.0, 220.0), 0.08)
+	_shared_audio.position = cube.global_position
+	_push_chime(440.0 + randf_range(-60.0, 220.0), 0.08)
 
-func _push_chime(player: AudioStreamPlayer3D, freq: float, duration: float):
-	var playback = player.get_stream_playback()
-	if playback == null:
+func _push_chime(freq: float, duration: float):
+	if _audio_playback == null:
 		return
 	var n = int(SAMPLE_RATE * duration)
-	var to_fill = min(n, playback.get_frames_available())
+	var to_fill = min(n, _audio_playback.get_frames_available())
 	for i in range(to_fill):
 		var t = float(i) / SAMPLE_RATE
 		var env = sin(PI * t / duration)
 		var s = sin(TAU * freq * t) * env * 0.55
-		playback.push_frame(Vector2(s, s))
+		_audio_playback.push_frame(Vector2(s, s))
 
 func _on_kill_entered(body):
 	if body is RigidBody3D:
