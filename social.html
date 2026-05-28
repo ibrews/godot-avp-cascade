@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>godot-avp-cascade — Social Card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#060810;--teal:#00d4ff;--purple:#a78bfa;--amber:#f59e0b;--orange:#ff9a3c;
+  --text:#f0f4ff;--dim:rgba(240,244,255,.5);
+  --font:'Space Grotesk',system-ui,sans-serif;
+}
+html,body{width:1200px;height:630px;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font)}
+
+/* Background — same spatial-deck visual language */
+.bg{position:absolute;inset:0;overflow:hidden}
+.bg-gradient{position:absolute;inset:0;
+  background:radial-gradient(ellipse 80% 60% at 15% 50%,rgba(124,58,237,.22) 0%,transparent 55%),
+             radial-gradient(ellipse 60% 70% at 85% 20%,rgba(255,154,60,.10) 0%,transparent 55%),
+             linear-gradient(180deg,#060810 0%,#0b0820 50%,#060810 100%);
+}
+canvas{position:absolute;inset:0}
+
+/* Cascade scene on the right */
+.scene{position:absolute;top:50%;right:80px;transform:translateY(-50%);width:360px;height:380px}
+.scene svg{width:100%;height:100%;overflow:visible}
+
+/* Content */
+.content{position:absolute;top:50%;left:80px;transform:translateY(-50%);max-width:680px;z-index:10}
+.tag{
+  font-size:14px;font-weight:600;letter-spacing:.32em;text-transform:uppercase;
+  color:var(--teal);opacity:.9;margin-bottom:24px;
+}
+.title{
+  font-size:96px;font-weight:700;line-height:.94;letter-spacing:-.03em;
+  background:linear-gradient(130deg,#fff 18%,#ffd6a8 50%,#ff9a3c 90%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  margin-bottom:18px;
+}
+.title .sub{
+  display:block;font-size:96px;
+  background:linear-gradient(130deg,#fff 18%,#a5d8ff 55%,#9b8cff 90%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+}
+.tagline{
+  font-size:24px;font-weight:400;color:var(--dim);line-height:1.4;
+  max-width:600px;margin-bottom:36px;
+}
+.meta{
+  display:flex;align-items:center;gap:14px;
+  font-size:13px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;
+  color:rgba(255,255,255,.45);
+}
+.meta .pill{
+  display:inline-flex;align-items:center;gap:8px;
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);
+  border-radius:30px;padding:9px 18px;
+}
+.meta .pill .lbl{opacity:.45;font-size:10px}
+.meta .url{color:var(--teal);opacity:.85}
+
+/* Footer brand mark */
+.footer{
+  position:absolute;bottom:36px;left:80px;right:80px;
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:12px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;
+  color:rgba(255,255,255,.32);
+}
+.footer .accent{color:var(--orange);opacity:.7}
+</style>
+</head>
+<body>
+<div class="bg">
+  <div class="bg-gradient"></div>
+  <canvas id="stars"></canvas>
+</div>
+
+<!-- Cascade scene: tilted catch plate + falling emissive cubes + side deflector -->
+<div class="scene">
+  <svg viewBox="0 0 360 380">
+    <defs>
+      <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+        <feGaussianBlur stdDeviation="4" result="blur"/>
+        <feMerge>
+          <feMergeNode in="blur"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+      <linearGradient id="cubeGrad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#ffc070"/>
+        <stop offset="60%" stop-color="#ff9a3c"/>
+        <stop offset="100%" stop-color="#e87010"/>
+      </linearGradient>
+      <linearGradient id="plateGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#6b78a0"/>
+        <stop offset="100%" stop-color="#3a4566"/>
+      </linearGradient>
+      <linearGradient id="wallGrad" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#5a8acc"/>
+        <stop offset="100%" stop-color="#2c4a78"/>
+      </linearGradient>
+    </defs>
+
+    <!-- Faint vertical guide lines suggesting depth -->
+    <line x1="20" y1="0" x2="20" y2="380" stroke="rgba(167,139,250,.08)" stroke-width="1"/>
+    <line x1="340" y1="0" x2="340" y2="380" stroke="rgba(0,212,255,.08)" stroke-width="1"/>
+
+    <!-- Tilted catch plate (faux-3D as parallelogram) -->
+    <g opacity="0.92">
+      <!-- top face -->
+      <polygon points="40,280 320,220 330,235 50,295" fill="url(#plateGrad)" stroke="rgba(180,200,255,.4)" stroke-width="1"/>
+      <!-- front edge -->
+      <polygon points="50,295 330,235 330,250 50,310" fill="#252e44" stroke="rgba(180,200,255,.2)" stroke-width="1"/>
+    </g>
+
+    <!-- Side deflector wall (faux-3D parallelogram) -->
+    <g opacity="0.85">
+      <polygon points="305,140 330,128 330,220 305,232" fill="url(#wallGrad)" stroke="rgba(180,220,255,.45)" stroke-width="1"/>
+    </g>
+
+    <!-- Falling cubes — varied positions + rotations -->
+    <g filter="url(#glow)">
+      <rect x="0" y="0" width="40" height="40" fill="url(#cubeGrad)" stroke="rgba(255,200,100,.7)" stroke-width="1.5" rx="2"
+            transform="translate(180,30) rotate(15)"/>
+    </g>
+    <g filter="url(#glow)">
+      <rect x="0" y="0" width="36" height="36" fill="url(#cubeGrad)" stroke="rgba(255,180,80,.7)" stroke-width="1.5" rx="2"
+            transform="translate(150,110) rotate(-25)"/>
+    </g>
+    <g filter="url(#glow)">
+      <rect x="0" y="0" width="34" height="34" fill="url(#cubeGrad)" stroke="rgba(255,180,80,.7)" stroke-width="1.5" rx="2"
+            transform="translate(220,160) rotate(40)"/>
+    </g>
+    <g filter="url(#glow)">
+      <rect x="0" y="0" width="32" height="32" fill="url(#cubeGrad)" stroke="rgba(230,150,60,.8)" stroke-width="1.5" rx="2"
+            transform="translate(110,210) rotate(-15)"/>
+    </g>
+    <g filter="url(#glow)">
+      <rect x="0" y="0" width="30" height="30" fill="url(#cubeGrad)" stroke="rgba(230,150,60,.8)" stroke-width="1.5" rx="2"
+            transform="translate(180,250) rotate(8)"/>
+    </g>
+
+    <!-- A faint "spawn point" indicator at top -->
+    <circle cx="200" cy="15" r="3" fill="rgba(255,154,60,.35)"/>
+    <circle cx="200" cy="15" r="8" fill="none" stroke="rgba(255,154,60,.18)" stroke-width="1"/>
+  </svg>
+</div>
+
+<div class="content">
+  <div class="tag">Open Source · Apple Vision Pro</div>
+  <h1 class="title">godot-avp-<span class="sub">cascade</span></h1>
+  <p class="tagline">Godot physics in your Vision Pro — at <strong style="color:var(--orange);font-weight:600">90 FPS</strong>, in the void.</p>
+  <div class="meta">
+    <div class="pill"><span class="lbl">Repo</span><span class="url">github.com/ibrews/godot-avp-cascade</span></div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Godot · rsanchezsaez fork · Mobile renderer · Metal</span>
+  <span><span class="accent">RigidBody3D</span> · AudioStreamGenerator · <span class="accent">90 FPS LOCKED</span></span>
+</div>
+
+<script>
+// Stars background — same density as spatial-deck
+const cv=document.getElementById('stars'),sc=cv.getContext('2d');
+cv.width=1200;cv.height=630;
+const stars=Array.from({length:90},()=>({
+  x:Math.random()*1200,y:Math.random()*630,
+  r:Math.random()*1.4+.3,o:Math.random()*.5+.15
+}));
+sc.clearRect(0,0,1200,630);
+stars.forEach(s=>{
+  sc.beginPath();sc.arc(s.x,s.y,s.r,0,Math.PI*2);
+  sc.fillStyle=`rgba(210,225,255,${s.o})`;sc.fill();
+});
+</script>
+</body>
+</html>
