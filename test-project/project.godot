@@ -25,9 +25,5 @@ environment/defaults/default_clear_color=Color(0, 0, 0, 0)
 
 [xr]
 
-openxr/enabled=true
-openxr/reference_space=2
-openxr/foveation_level=2
-openxr/foveation_dynamic=true
 openxr/extensions/hand_interaction_profile=true
 shaders/enabled=true

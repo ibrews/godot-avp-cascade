@@ -162,6 +162,7 @@ func _setup_hands() -> void:
 		handler.hold_while_hand_tracking_uncertain = true
 
 		var cs := CollisionShape3D.new()
+		cs.name = "CollisionShape3D"  # PickupHandler3D looks up $CollisionShape3D by this exact name
 		var sphere := SphereShape3D.new()
 		sphere.radius = 0.08
 		cs.shape = sphere
@@ -288,7 +289,7 @@ func _push_chime(freq: float, duration: float, harmonic: bool):
 	if _audio_playback == null:
 		return
 	var n := int(SAMPLE_RATE * duration)
-	var to_fill := min(n, _audio_playback.get_frames_available())
+	var to_fill: int = min(n, _audio_playback.get_frames_available())
 	for i in range(to_fill):
 		var t := float(i) / SAMPLE_RATE
 		var env := sin(PI * t / duration)

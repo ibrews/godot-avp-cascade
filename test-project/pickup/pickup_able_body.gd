@@ -5,7 +5,7 @@ class_name PickupAbleBody3D
 # from the visionosxr_hand_tracking reference project.
 # Added: throw velocity from recent position history on release.
 
-var highlight_material : Material = preload("res://shaders/highlight_material.tres")
+var highlight_material : Material = load("res://shaders/highlight_material.tres")
 var picked_up_by : Area3D
 var closest_areas : Array
 
@@ -88,11 +88,13 @@ func let_go() -> void:
 	# Compute throw velocity from recent hand movement.
 	var throw_velocity := Vector3.ZERO
 	if _pos_history.size() >= 2:
-		var newest = _pos_history[-1]
-		var oldest = _pos_history[0]
-		var dt_sec := (newest["t"] - oldest["t"]) / 1000.0
+		var newest: Dictionary = _pos_history[-1]
+		var oldest: Dictionary = _pos_history[0]
+		var dt_sec: float = (float(newest["t"]) - float(oldest["t"])) / 1000.0
 		if dt_sec > 0.001:
-			throw_velocity = (newest["pos"] - oldest["pos"]) / dt_sec
+			var new_pos: Vector3 = newest["pos"]
+			var old_pos: Vector3 = oldest["pos"]
+			throw_velocity = (new_pos - old_pos) / dt_sec
 	_pos_history.clear()
 
 	# Remember our current transform.
