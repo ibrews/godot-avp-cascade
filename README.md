@@ -4,7 +4,7 @@
 
 Twenty-five emissive orange cubes drop onto a tilted catch plate in your immersive space. Each collision triggers a procedurally-synthesized chime. Walk around it. The first publicly-documented Godot `RigidBody3D` physics scene rendering in immersive mode on real AVP at locked 90 FPS.
 
-![Cascade still](captures/frame_2s.jpg)
+![Cascade demo](captures/cascade.gif)
 
 ## Status
 
