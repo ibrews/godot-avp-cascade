@@ -26,10 +26,6 @@ var _shared_audio: AudioStreamPlayer3D
 var _audio_playback: AudioStreamGeneratorPlayback
 var _active_cubes: Array = []
 var _collision_count := 0
-var _music_player: AudioStreamPlayer
-var _music_playback: AudioStreamGeneratorPlayback
-var _music_phase := 0.0
-var _lfo_phase := 0.0
 
 func _ready():
 	var interface = XRServer.find_interface("visionOS")
@@ -160,16 +156,6 @@ func _setup_audio():
 	_shared_audio.play()
 	_audio_playback = _shared_audio.get_stream_playback()
 
-	# Music bed — 180 Hz sine + 0.1 Hz LFO, −18 dB so chimes stay foreground.
-	_music_player = AudioStreamPlayer.new()
-	var music_gen := AudioStreamGenerator.new()
-	music_gen.mix_rate = SAMPLE_RATE
-	music_gen.buffer_length = 0.5
-	_music_player.stream = music_gen
-	_music_player.volume_db = -18.0
-	add_child(_music_player)
-	_music_player.play()
-	_music_playback = _music_player.get_stream_playback()
 
 func _process(delta: float):
 	_frame_count += 1
@@ -182,7 +168,7 @@ func _process(delta: float):
 	if _log_timer >= 5.0:
 		_log_timer = 0.0
 		_append_log("frames=%d active=%d collisions=%d" % [_frame_count, _active_cubes.size(), _collision_count])
-	_push_music_frames()
+
 
 func _spawn_cube():
 	var cube := RigidBody3D.new()
@@ -244,17 +230,6 @@ func _push_chime(freq: float, duration: float):
 		var env = sin(PI * t / duration)
 		var s = sin(TAU * freq * t) * env * 0.55
 		_audio_playback.push_frame(Vector2(s, s))
-
-func _push_music_frames():
-	if _music_playback == null:
-		return
-	var to_fill = _music_playback.get_frames_available()
-	for i in range(to_fill):
-		var amp = 0.7 * (1.0 + 0.3 * sin(_lfo_phase))
-		var s = amp * sin(_music_phase)
-		_music_playback.push_frame(Vector2(s, s))
-		_music_phase += TAU * 180.0 / SAMPLE_RATE
-		_lfo_phase += TAU * 0.1 / SAMPLE_RATE
 
 func _on_kill_entered(body):
 	if body is RigidBody3D:
