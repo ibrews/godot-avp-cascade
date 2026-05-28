@@ -25,12 +25,12 @@ If you're confused about Godot on AVP, the KB has the answer. Do not improvise a
 ## Iteration loop (proven, ~3-4 min per round-trip)
 
 ```bash
-# 1. Edit test-project/main_v2.tscn or project.godot
-# 2. Re-export PCK
+# 1. Edit test-project/main_v2.gd or project.godot
+# 2. Re-export PCK  (output path MUST be absolute — relative paths resolve from the project dir, not cwd)
 ~/godot-visionos-pilot/Godot.app/Contents/MacOS/Godot --headless \
-  --path test-project \
+  --path /Users/alex/godot-visionos-pilot/test-project \
   --export-pack "visionOS" \
-  out/xcode-visionos/GodotVisionPilot.pck
+  /Users/alex/godot-visionos-pilot/out/xcode-visionos/GodotVisionPilot.pck
 
 # 3. xcodebuild
 xcodebuild \
