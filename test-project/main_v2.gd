@@ -2,6 +2,7 @@ extends Node3D
 
 # Falling Cascade — physics-driven self-running demo for AVP/Godot immersive.
 # All physics geometry built procedurally in _ready() to keep the .tscn minimal.
+# Hand tracking pickup/throw courtesy of Marshall Nowak (Nocxr) — visionosxr_hand_tracking.
 
 const SPAWN_INTERVAL := 0.35
 const KILL_Y := -2.0
@@ -51,7 +52,8 @@ func _ready():
 	_build_resources()
 	_build_static_scene()
 	_setup_audio()
-	_write_log("Static scene built; audio ready")
+	_setup_hands()
+	_write_log("Static scene built; audio ready; hand tracking active")
 
 func _build_resources():
 	_physics_material = PhysicsMaterial.new()
@@ -143,6 +145,31 @@ func _setup_audio():
 	_shared_audio.play()
 	_audio_playback = _shared_audio.get_stream_playback()
 
+# Build one XRController3D + PickupHandler3D for each hand and attach to XROrigin3D.
+# PickupHandler3D (from Marshall Nowak / Nocxr) handles pinch detection, finger-tip
+# anchoring, and the pick-up/throw lifecycle via XRHandTracker joint data.
+func _setup_hands() -> void:
+	var xr_origin := $XROrigin3D
+	for side in ["left_hand", "right_hand"]:
+		var controller := XRController3D.new()
+		controller.tracker = side
+
+		# CollisionShape3D must be added as a child BEFORE the handler enters the tree
+		# so PickupHandler3D._ready() can call _update_detect_range() successfully.
+		var handler := PickupHandler3D.new()
+		handler.detect_range = 0.08   # 8 cm sphere — tight enough for precise pinch, wide enough to catch fast moves
+		handler.follow_fingertips = true
+		handler.hold_while_hand_tracking_uncertain = true
+
+		var cs := CollisionShape3D.new()
+		var sphere := SphereShape3D.new()
+		sphere.radius = 0.08
+		cs.shape = sphere
+		handler.add_child(cs)
+
+		controller.add_child(handler)
+		xr_origin.add_child(controller)
+
 func _process(delta: float):
 	_frame_count += 1
 	_log_timer += delta
@@ -164,7 +191,9 @@ func _spawn_cube():
 	var color: Color = CUBE_PALETTE[randi() % CUBE_PALETTE.size()]
 	var emission_e: float = randf_range(1.2, 3.5)
 
-	var cube := RigidBody3D.new()
+	# PickupAbleBody3D extends RigidBody3D — all existing physics properties still apply.
+	# The class adds pinch-grab detection, snap-to-hand, and throw-velocity on release.
+	var cube := PickupAbleBody3D.new()
 	cube.physics_material_override = _physics_material
 	# Scale mass with volume so small cubes are bouncier, big ones feel heavy.
 	cube.mass = max(0.08, size * size * size * 400.0)
