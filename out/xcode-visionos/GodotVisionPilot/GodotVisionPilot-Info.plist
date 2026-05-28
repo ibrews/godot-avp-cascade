@@ -44,6 +44,10 @@
 	<string></string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string></string>
+	<key>NSHandsTrackingUsageDescription</key>
+	<string>This app uses hand tracking so you can pinch, grab, and throw cubes.</string>
+	<key>NSWorldSensingUsageDescription</key>
+	<string>This app uses world sensing for spatial tracking.</string>
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UIStatusBarHidden</key>
