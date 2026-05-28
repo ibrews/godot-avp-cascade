@@ -1,0 +1,28 @@
+; Engine configuration file.
+; Matched to rsanchezsaez visionOS demo project settings.
+
+config_version=5
+
+[application]
+
+config/name="GodotVisionPilot"
+config/features=PackedStringArray("4.6", "Mobile")
+run/main_scene="res://main_v2.tscn"
+
+[display]
+
+window/vsync/vsync_mode=0
+
+[rendering]
+
+rendering_device/fallback_to_vulkan=false
+rendering_device/fallback_to_d3d12=false
+rendering_device/fallback_to_opengl3=false
+renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"
+textures/vram_compression/import_etc2_astc=true
+environment/defaults/default_clear_color=Color(0, 0, 0, 0)
+
+[xr]
+
+shaders/enabled=true

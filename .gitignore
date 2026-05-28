@@ -1,0 +1,27 @@
+# Godot
+test-project/.godot/
+test-project/.import/
+test-project/export_presets.cfg.bak
+
+# Engine source clones (huge, regenerable)
+rsanchezsaez-godot/
+OpenXR-OSX/
+
+# Xcode build artifacts
+out/xcode-visionos/build/
+out/xcode-visionos/*.xcodeproj/xcuserdata/
+out/xcode-visionos/*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Built PCKs (regenerable from test-project/)
+out/xcode-visionos/GodotVisionPilot.pck
+
+# Templates / large binary bundles
+templates.tpz
+Godot.app/
+
+# Captures (KB has them; pilot only keeps source-of-truth)
+# Keep cascade-2026-05-27.mp4 since it's the canonical first capture
+captures/frame_*.jpg
+
+# macOS noise
+.DS_Store

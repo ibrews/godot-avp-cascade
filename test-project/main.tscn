@@ -1,0 +1,177 @@
+[gd_scene load_steps=6 format=3 uid="uid://pilot_main"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_1"]
+size = Vector3(0.4, 0.4, 0.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_Close"]
+size = Vector3(0.15, 0.15, 0.15)
+
+[sub_resource type="StandardMaterial3D" id="Material_1"]
+shading_mode = 0
+albedo_color = Color(1.0, 0.5, 0.1, 1)
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 1
+background_color = Color(0.0, 0.0, 0.0, 0.0)
+ambient_light_source = 2
+ambient_light_color = Color(1.0, 1.0, 1.0, 1)
+ambient_light_energy = 1.0
+
+[sub_resource type="GDScript" id="Script_1"]
+script/source = "extends Node3D
+
+var _beep_player: AudioStreamPlayer
+var _beep_playback: AudioStreamGeneratorPlayback
+var _beep_interval := 1.2
+var _beep_freq := 880.0
+var _beep_duration := 0.15
+var _sample_rate := 44100.0
+var _xr_ok := false
+var _frame_count := 0
+var _log_timer := 0.0
+
+func _ready():
+	var interface = XRServer.find_interface(\"visionOS\")
+	if interface and interface.initialize():
+		print(\"[Pilot] visionOS XR initialized OK\")
+		_xr_ok = true
+		var viewport = get_viewport()
+		viewport.use_xr = true
+		viewport.vrs_mode = Viewport.VRS_XR
+	else:
+		print(\"[Pilot] visionOS XR init FAILED\")
+	_write_log(\"XR init: \" + (\"OK\" if _xr_ok else \"FAILED\"))
+	_setup_beep()
+	_queue_beep()
+
+func _process(delta: float):
+	_frame_count += 1
+	_log_timer += delta
+	if _log_timer >= 5.0:
+		_log_timer = 0.0
+		_append_log(\"frames=%d xr_ok=%s\" % [_frame_count, str(_xr_ok)])
+
+func _write_log(msg: String):
+	var f = FileAccess.open(\"user://xr_diag.txt\", FileAccess.WRITE)
+	if f:
+		f.store_string(msg + \"\\n\")
+		f.close()
+		print(\"[Pilot] \" + msg)
+
+func _append_log(msg: String):
+	var f = FileAccess.open(\"user://xr_diag.txt\", FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open(\"user://xr_diag.txt\", FileAccess.WRITE)
+	if f:
+		f.seek_end(0)
+		f.store_string(msg + \"\\n\")
+		f.close()
+		print(\"[Pilot] \" + msg)
+
+func _setup_beep():
+	var gen = AudioStreamGenerator.new()
+	gen.mix_rate = _sample_rate
+	gen.buffer_length = 0.5
+	_beep_player = AudioStreamPlayer.new()
+	_beep_player.stream = gen
+	_beep_player.volume_db = 0.0
+	add_child(_beep_player)
+	_beep_player.play()
+	_beep_playback = _beep_player.get_stream_playback()
+
+func _queue_beep():
+	await get_tree().create_timer(_beep_interval).timeout
+	_push_beep(_beep_freq, _beep_duration)
+	_queue_beep()
+
+func _push_beep(freq: float, duration: float):
+	if _beep_playback == null:
+		return
+	var num_samples = int(_sample_rate * duration)
+	for i in range(num_samples):
+		var t = float(i) / _sample_rate
+		var env = sin(PI * t / duration)
+		var sample = sin(TAU * freq * t) * env * 0.6
+		_beep_playback.push_frame(Vector2(sample, sample))
+"
+
+[node name="Main" type="Node3D"]
+script = SubResource("Script_1")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_1")
+
+[node name="XROrigin3D" type="XROrigin3D" parent="."]
+current = true
+
+[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
+near = 0.15
+
+[node name="Cube_HUD" type="MeshInstance3D" parent="XROrigin3D/XRCamera3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
+mesh = SubResource("BoxMesh_Close")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 4, 0)
+light_energy = 1.5
+
+[node name="Cube_Center" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -1.5)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_Close" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -0.8)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_N" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -3)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_NE" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.5, -2)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_E" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 1.5, 0)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_SE" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.5, 2)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_S" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 3)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_SW" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 1.5, 2)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_W" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.5, 0)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_NW" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 1.5, -2)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_High" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, -2)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
+
+[node name="Cube_Low" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, -2)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("Material_1")
