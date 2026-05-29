@@ -1,131 +1,108 @@
 # HANDOFF — Next session pickup brief
 
-**Current state as of 2026-05-28 (morning session):** v6 (hand tracking) committed `f7ac2d6` and pushed. Build succeeded. **NOT yet installed on device** — AVP was asleep. Install is the first thing to do next session.
+**Current state as of 2026-05-29:** Hand tracking is **WORKING on device** — pinch-grab + throw, 90 FPS, mixed immersion, compositing into the real room. Catch plates and the deflector wall are grabbable too. All committed and pushed.
 
-**Read this whole file before doing anything.** Self-contained pickup — no prior transcript needed.
+**Read this whole file before doing anything.** Self-contained — no prior transcript needed.
 
-## First thing next session
+## ⚠️ The single most important thing to know
+
+**The working engine is a borrowed binary that is NOT in git.** Hand tracking only works because we swapped Marshall Nowak's Clancey-fork `libgodot.a` into our xcframework. `libgodot.a` is `.gitignore`'d. **A fresh clone, or any `--export` that regenerates the xcframework, reverts to the rsanchezsaez render-only engine and silently loses hand tracking** (cubes render, nothing grabbable, no permission prompt).
+
+- Working lib lives at: `out/xcode-visionos/GodotVisionPilot.xcframework/xros-arm64/libgodot.a` (Clancey `visionos_master_pr`, version `4.6.2.rc.custom_build`, build commit `85f0afd`)
+- Rollback copy: `out/xcode-visionos/GodotVisionPilot.xcframework/xros-arm64/libgodot.a.rsanchezsaez.bak`
+- Durable archive: `~/godot-engine-bin-archive/clancey-handtracking-4.6.2/` (both slices + MANIFEST). **Still needs offsite/NAS backup — it's the only copy outside Marshall's Desktop.**
+- Full recipe: KB [`godot-avp-hand-tracking-engine-swap.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md)
+
+## What's working (verified on device 2026-05-28/29)
+
+- **Cube cascade** — 8-colour palette, randomised sizes, collision flash light, dual collision audio (plate chime vs cube tink), 90 FPS locked
+- **Mixed immersion** — composites into the real room, no halo artifacts
+- **Hand tracking** — pinch near any cube (0.3 m grab radius) → highlights yellow, snaps to pinch, throws with hand velocity on release
+- **Grabbable plates + wall** — pinch and reposition; they stay put on release (frozen kinematic, `freeze_on_release`)
+
+## How hand tracking actually works here (the three layers)
+
+1. **Engine** (Clancey `visionos_master_pr`) — the ONLY layer that bridges ARKit hand tracking into Godot's `XRHandTracker`. rsanchezsaez has none. This is why the swap was necessary.
+2. **Permissions** — `NSHandsTrackingUsageDescription` + `NSWorldSensingUsageDescription` in the tracked Info.plist (`out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist`). `--export-pack` does NOT regenerate this file — edit it directly. Empty `.entitlements` is fine.
+3. **Project** — `openxr/extensions/hand_interaction_profile=true` in project.godot; `PickupHandler3D`/`PickupAbleBody3D` (Marshall's, derived from godot-xr-tools Function_Pickup); two `XRController3D` (left_hand/right_hand) built procedurally in `_setup_hands()`.
+
+## Critical build gotchas (learned the hard way this session)
+
+- **Version gap:** our editor (`Godot.app`) is 4.6.3.stable; the runtime lib is Clancey 4.6.2.rc. `script_export_mode=0` (Text) in `export_presets.cfg` is REQUIRED so the 4.6.2 runtime compiles scripts from source — binary tokens (mode 2) silently fail to load → passthrough-only. Don't revert this until editor and lib are version-matched.
+- **Headless-verify before every device round-trip:** `Godot.app/Contents/MacOS/Godot --headless --path test-project --quit-after 120` and grep for `SCRIPT ERROR`/`Parse Error`/`Compile Error`. `--export-pack` swallows compile errors and ships broken bytecode → passthrough. See KB [`godot-headless-verify-before-device.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-headless-verify-before-device.md).
+- **PCK export output path MUST be absolute** — relative paths resolve from the project dir, not cwd.
+- **No `var x := min(...)` / Dictionary-access inference** — `min()`/`max()` and `dict[key]` return Variant; `:=` then warns→errors on load. Type explicitly (`var x: int = min(...)`).
+
+## Build + deploy loop (current, working)
 
 ```bash
-# 1. Install v6 (put headset on first — AVP sleeps when not worn)
-xcrun devicectl device install app \
-  --device 2642855C-6B73-5D5B-9387-6B110E7A7CF3 \
-  $(ls -d ~/Library/Developer/Xcode/DerivedData/GodotVisionPilot-*/Build/Products/Debug-xros/GodotVisionPilot.app)
+# 1. (after any .gd / project.godot edit) headless verify
+~/godot-visionos-pilot/Godot.app/Contents/MacOS/Godot --headless --path /Users/alex/godot-visionos-pilot/test-project --quit-after 120 2>&1 | grep -iE "error|parse|compile" | grep -v "XR=FAILED"
 
-# 2. Verify 90 FPS still holds with v6
-xcrun devicectl device copy from \
-  --device 2642855C-6B73-5D5B-9387-6B110E7A7CF3 \
-  --source "Documents/xr_diag.txt" \
-  --destination /tmp/xr_diag.txt \
-  --domain-type appDataContainer \
-  --domain-identifier com.agilelens.godotvisionpilot
-cat /tmp/xr_diag.txt
-# Per-5s delta must be 450. If it drops: reduce particles.amount from 12→8 in main_v2.gd.
+# 2. export PCK (ABSOLUTE output path)
+~/godot-visionos-pilot/Godot.app/Contents/MacOS/Godot --headless \
+  --path /Users/alex/godot-visionos-pilot/test-project --export-pack "visionOS" \
+  /Users/alex/godot-visionos-pilot/out/xcode-visionos/GodotVisionPilot.pck
 
-# 3. Test hand tracking
-# Try pinching near a cube — should highlight yellow, snap to pinch point.
-# Throw: flick wrist, release pinch. Cube should retain throw velocity.
+# 3. build (generic destination avoids "device unavailable" when AVP asleep)
+xcodebuild -project out/xcode-visionos/GodotVisionPilot.xcodeproj \
+  -scheme GodotVisionPilot -configuration Debug \
+  -destination "generic/platform=visionOS" \
+  CODE_SIGN_IDENTITY="Apple Development" DEVELOPMENT_TEAM="C624J4S2F8" build
+
+# 4. install (put headset ON first — AVP sleeps when not worn; retry 2-3x)
+xcrun devicectl device install app --device 2642855C-6B73-5D5B-9387-6B110E7A7CF3 \
+  "$(ls -d ~/Library/Developer/Xcode/DerivedData/GodotVisionPilot-*/Build/Products/Debug-xros/GodotVisionPilot.app)"
+
+# 5. verify FPS (boot line must read "...hand tracking active"; per-5s delta 450 = 90 FPS)
+xcrun devicectl device copy from --device 2642855C-6B73-5D5B-9387-6B110E7A7CF3 \
+  --source "Documents/xr_diag.txt" --destination /tmp/xr_diag.txt \
+  --domain-type appDataContainer --domain-identifier com.agilelens.godotvisionpilot
+head -6 /tmp/xr_diag.txt
 ```
 
-## What's working right now
+## Remaining agenda (priority order)
 
-- **Mixed immersion** confirmed — cubes composite into real room, no artifacts
-- **Spatial audio** confirmed — chimes attenuate with distance, stereo panning works
-- **PR comment live** on godotengine/godot#109975 — positive reply from @stuartcarnie
-- Info.plist tracked at `out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist` (`UIImmersionStyleMixed`)
+1. **Make hand tracking durable (the big one).** Build Clancey `visionos_master_pr` ourselves (HEAD `2b2f749`, 2026-03-03 — full hand tracking) as our canonical `Godot.app` + `libgodot.a`, version-matched so we can drop the text-mode workaround. ~30–90 min on M1 Max. Coordinate with Marshall first (Slack `U04MR6H85K6`) — he built it; get his build gotchas + whether he has a shareable fork. **Also: push the archived lib to offsite/NAS backup now** (it's the only copy off Marshall's Desktop).
+2. **README GIF** — full visual is ready (cubes, light, mixed mode, hand grab/throw). AirPlay → QuickTime, or Xcode → Devices → Record Screen → ffmpeg two-pass palettegen 720×405 15fps → replace `captures/cascade.gif`.
+3. **Progressive immersion + skybox** (~15 min) — Info.plist `UIImmersionStyleMixed` → `UIImmersionStyleProgressive`; add `ProceduralSkyMaterial` to WorldEnvironment.
+4. **Hand-as-collision-mesh** (next sprint) — 5 `AnimatableBody3D` capsules per hand at finger joints from `XRHandTracker`, so hands deflect cubes without pinching.
+5. **Watch upstream** — Apple's hand tracking is "ready but unsubmitted." When it lands in rsanchezsaez/upstream, migrate off Clancey's fork to the official path.
 
-## What changed in v6 (built, not yet installed)
+## Engine landscape (so you don't re-research)
 
-1. **`openxr/extensions/hand_interaction_profile=true`** added to `project.godot` — the missing flag that enables XRHandTracker joint data on AVP
-2. **`PickupHandler3D`** — Marshall Nowak's (Nocxr) hand-tracking Area3D, copied verbatim from `visionosxr_hand_tracking` project
-   - Pinch detection: joint-distance (0.06 m=0%, 0.025 m=100%), threshold 0.35 to pickup, 0.12 to release, 180 ms grace window
-   - Fingertip anchoring: handler moves to index+thumb midpoint each physics frame
-   - `hold_while_hand_tracking_uncertain=true` — keeps hold if tracking momentarily drops
-3. **`PickupAbleBody3D`** — extends `RigidBody3D`, adds snap-to-pinch + throw velocity
-   - Tracks last 6 global positions in `_physics_process()` while held
-   - `let_go()` applies `linear_velocity` from position delta → cube inherits hand speed on throw
-   - Yellow highlight outline on nearest grabbable cube (grow-normal shader)
-4. **Hand setup** in `_ready()` — two `XRController3D` nodes (left_hand, right_hand) with `PickupHandler3D` children added procedurally to `XROrigin3D`
-5. **Spawned cubes** are `PickupAbleBody3D` instead of `RigidBody3D` — drop-in since it extends `RigidBody3D`; all physics properties unchanged
-6. **README** updated — description, Things to Try (#2 is grab/throw), Marshall's credit in Credits section
-
-## Key files changed
-
-```
-test-project/main_v2.gd              # _setup_hands(), PickupAbleBody3D spawn
-test-project/project.godot           # openxr flags added
-test-project/pickup/pickup_handler.gd       # Marshall's PickupHandler3D (verbatim)
-test-project/pickup/pickup_able_body.gd     # + throw velocity
-test-project/shaders/highlight_shader.tres  # yellow grow-normal outline
-test-project/shaders/highlight_material.tres
-README.md
-```
-
-## Known risks for v6 test
-
-- **XRHandTracker availability**: Hand tracking requires `openxr/extensions/hand_interaction_profile=true` (now added) AND Clancey's fork. Confirm we're on the right engine branch; if joint data never arrives, `PickupHandler3D._get_pickup_value()` will fall back to controller float inputs (grip, trigger, pinch) which may fire spuriously.
-- **detect_range = 0.08 m**: Tight 8 cm sphere. If cubes are hard to grab, increase to 0.12 in `_setup_hands()`. No rebuild needed — just re-export PCK.
-- **Reparenting + _active_cubes**: When cube is picked up it reparents to the handler. `_on_kill_entered` checks `if body is RigidBody3D` — `PickupAbleBody3D` passes this check. Should be fine. Watch for cubes stuck in mid-air if the kill plane fires during a pickup.
-
-## Tomorrow's remaining agenda
-
-### 1. Progressive immersion + skybox (~15 min)
-
-- Change Info.plist `UIImmersionStyleMixed` → `UIImmersionStyleProgressive`
-- Digital Crown lets user blend 0% (mixed) → 100% (full) at will
-- Add `ProceduralSkyMaterial` to WorldEnvironment in `main_v2.tscn` (or procedurally)
-
-### 2. README GIF
-
-v6 has full visual + mixed mode + hand tracking. Capture when confirmed on device.
-AirPlay → QuickTime → 7–10s clip → ffmpeg two-pass palettegen, 720×405, 15fps → replace `captures/cascade.gif`.
-High-fidelity: Xcode → Window → Devices and Simulators → select AVP → Record Screen.
-
-### 3. Hand-as-collision-mesh (non-trivial, next sprint)
-
-5 `AnimatableBody3D` capsules at fingertips, updated from `XRHandTracker` each frame.
-Requires knowing joint positions without pinch gesture.
-
-## Dev Strap install gotcha
-
-`xcrun devicectl device install` fails if AVP is asleep. Put headset on first, retry 2–3×.
-
-## Read these FIRST
-
-1. [`CLAUDE.md`](CLAUDE.md) — build loop, critical constraints, do-nots
-2. KB: [`intelligence/techniques/godot-visionos-xr.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-visionos-xr.md)
-3. KB: [`intelligence/techniques/godot-avp-falling-cascade.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-falling-cascade.md)
-
-## Critical contacts
-
-- **Marshall Nowak** (Nocxr) — Agile Lens. Slack `U04MR6H85K6`. Arizona (no DST). Provided the hand tracking reference project (`visionosxr_hand_tracking`) from Clancey's fork.
-- **Alex Coulombe** — pilot owner. One round-trip ≈ 3–4 min.
+| Engine | Hand tracking | Notes |
+|--------|:---:|-------|
+| rsanchezsaez/godot `apple/visionos-xr` | ❌ render-only | Apple's official PR branch (#109975). No hand input compiled in. |
+| **Clancey/godot `visionos_master_pr`** | ✅ | HEAD `2b2f749`. Our running lib is pre-rebase `85f0afd` (diverged, also works). **This is what we use.** |
 
 ## Don't break what works
 
-- `main.tscn` is the fallback minimal scene. Keep it.
+- **Don't run a full `--export`** (vs `--export-pack`) without re-applying the Clancey lib swap AND the tracked Info.plist (`UIImmersionStyleMixed` + the two hand/world usage keys). A full export regenerates the xcframework → reverts to rsanchezsaez.
+- **Don't revert `script_export_mode=0`** until editor and lib are the same Godot version.
 - `XROrigin3D.current = true` in main_v2.tscn — silent killer if removed.
-- Connect `body_entered` AFTER `add_child()` on RigidBody3D.
-- `out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist` is tracked — don't overwrite with a full `--export` without re-applying `UIImmersionStyleMixed`.
-- `PickupHandler3D` uses `$CollisionShape3D` in `_ready()` — CollisionShape3D child MUST be added to handler before handler enters the tree. Already done in `_setup_hands()`.
+- `main.tscn` is the fallback minimal scene. Keep it.
+- `PickupHandler3D` uses `$CollisionShape3D` in `_ready()` — the CollisionShape3D child must be named `"CollisionShape3D"` and added before the handler enters the tree (done in `_setup_hands()`).
+- Plates/wall are `PickupAbleBody3D` in group `"surface"`; cubes in group `"cube"`. Audio + kill-plane classify by group — keep the groups if you touch spawn code.
 
-## State of the working tree
+## Critical contacts
+
+- **Marshall Nowak** (Nocxr) — Agile Lens. Slack `U04MR6H85K6`. Arizona (no DST). Built the Clancey `visionos_master_pr` engine; provided the `libgodot.a` + `visionosxr_hand_tracking` reference project. Coordinate before rebuilding the engine.
+- **Alex Coulombe** — pilot owner. One round-trip ≈ 3–4 min.
+
+## Key files
 
 ```
-Pilot repo: /Users/alex/godot-visionos-pilot/ (git, branch main, public on GitHub)
-KB: ~/knowledge/ (separate repo)
-
-Critical files:
-  test-project/main_v2.gd                                      # Cascade script (v6 — hand tracking)
-  test-project/main_v2.tscn                                    # scene (ExtResource → main_v2.gd)
-  test-project/main.tscn                                       # fallback minimal scene
-  test-project/project.godot                                   # XR project settings (OpenXR flags added)
-  test-project/export_presets.cfg                              # visionOS export config
-  test-project/pickup/pickup_handler.gd                       # Marshall's PickupHandler3D
-  test-project/pickup/pickup_able_body.gd                     # + throw velocity
-  test-project/shaders/highlight_{shader,material}.tres       # yellow outline on nearest cube
-  out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist  # immersion=Mixed (TRACKED)
-  Godot.app/                                                   # custom binary (gitignored)
-  rsanchezsaez-godot/                                          # engine source (gitignored)
-  captures/                                                    # cascade.gif = pre-v5, update when ready
+test-project/main_v2.gd               # cascade + _setup_hands() + grabbable plates/wall
+test-project/main_v2.tscn             # scene (XROrigin3D.current=true)
+test-project/main.tscn                # fallback minimal scene
+test-project/project.godot            # hand_interaction_profile=true, mobile renderer
+test-project/export_presets.cfg       # script_export_mode=0 (Text), hand/world privacy strings
+test-project/pickup/pickup_handler.gd    # Marshall's PickupHandler3D
+test-project/pickup/pickup_able_body.gd  # + throw velocity + freeze_on_release
+test-project/shaders/highlight_{shader,material}.tres
+out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist  # TRACKED: Mixed + hand/world keys
+out/xcode-visionos/GodotVisionPilot.xcframework/xros-arm64/libgodot.a  # Clancey lib (gitignored!) + .rsanchezsaez.bak
+Godot.app/                            # 4.6.3 editor (gitignored)
+~/godot-engine-bin-archive/clancey-handtracking-4.6.2/  # durable lib copy + MANIFEST
 ```
