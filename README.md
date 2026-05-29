@@ -8,9 +8,22 @@ The first publicly-documented Godot `RigidBody3D` physics scene rendering in imm
 
 ![Cascade demo](captures/cascade.gif)
 
+## ⚠️ Which Godot engine you need (read this first)
+
+Hand tracking is an **engine capability, not a project setting** — no amount of GDScript or Info.plist tweaking enables it. There are two visionOS Godot engine paths and **they are not interchangeable**:
+
+| Engine | Hand tracking | Use it if… |
+|--------|:---:|--------|
+| [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot) `apple/visionos-xr` — **Apple's official PR branch** | ❌ render-only | you only want the falling cascade (no grab/throw) |
+| [Clancey/godot](https://github.com/Clancey/godot/tree/visionos_interactions_master_rebase) `visionos_interactions_master_rebase` — commit `85f0afd` | ✅ pinch grab + throw | you want the **full demo as shown above** |
+
+**If the cubes render but you can't grab anything and you never saw a hand-tracking permission prompt — you're on the rsanchezsaez engine. Switch to Clancey's fork.** The missing permission prompt is the tell: rsanchezsaez never asks visionOS for hand data because the hand-tracking code isn't compiled in. See [Troubleshooting](#troubleshooting).
+
+> Apple has stated visionOS hand tracking is "ready but unsubmitted." When it lands in rsanchezsaez/upstream, this repo will migrate to the official path and Clancey's fork won't be needed. Until then, **hand tracking = Clancey's fork.**
+
 ## Status
 
-Experimental WIP. The underlying Godot engine path is [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot)'s `apple/visionos-xr` branch — a PR that's open but not yet merged into upstream Godot. Apple is contributing this work; Ricardo Sanchez-Saez (senior iOS engineer on the visionOS team) is the lead author. See the [PR thread](https://github.com/godotengine/godot/pull/109975) for current state.
+Experimental WIP. Rendering rides on Apple's official visionOS contribution — [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot)'s `apple/visionos-xr` branch (PR open, not yet merged upstream; Ricardo Sanchez-Saez, Apple visionOS team, is lead author — see the [PR thread](https://github.com/godotengine/godot/pull/109975)). **Hand tracking** rides on [Clancey's fork](https://github.com/Clancey/godot/tree/visionos_interactions_master_rebase), which rebases hand-interaction support on top — see [Which Godot engine you need](#️-which-godot-engine-you-need-read-this-first) above.
 
 Verified working **2026-05-28** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26.
 
@@ -58,7 +71,7 @@ You need:
 - macOS Apple Silicon (M1+) with Xcode 26 installed
 - Apple Vision Pro paired and trusted to your Xcode
 - Your Apple Developer Team ID
-- A built `libgodot.a` from [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot) `apple/visionos-xr` (see [building-the-engine](#building-the-engine) below)
+- A built `libgodot.a` + matching `Godot.app` editor from **[Clancey/godot](https://github.com/Clancey/godot/tree/visionos_interactions_master_rebase) `visionos_interactions_master_rebase` (commit `85f0afd`)** for hand tracking — or rsanchezsaez `apple/visionos-xr` if you only want the render-only cascade. See [building-the-engine](#building-the-engine) below. **Build both from the same commit** so the editor that exports the PCK matches the runtime lib.
 
 ```bash
 # Re-export the PCK from the test-project
@@ -89,19 +102,35 @@ xcrun devicectl device install app \
 
 1. **Confirm the scene renders at 90 FPS.** Pull diagnostic frame counts after a run: `xcrun devicectl device copy from --device <UDID> --source Documents/xr_diag.txt --destination /tmp/xr_diag.txt --domain-type appDataContainer --domain-identifier com.agilelens.godotvisionpilot`. Per-5s frame deltas should be exactly 450.
 2. **Grab and throw a cube.** Bring your index finger and thumb together (pinch) near any glowing cube — it will highlight yellow and snap to your pinch point. Flick your wrist and release to throw. Try deflecting a cascade of falling cubes.
+6. **Reposition the rig.** The catch plates and deflector wall are grabbable too — pinch one and move it, and it stays where you release it (it won't fall). Redirect the whole cascade mid-stream.
 3. **Change the spawn rate.** Edit `SPAWN_INTERVAL` in `test-project/main_v2.gd`. Try `0.15` for a downpour, `0.8` for a trickle. Re-export the PCK (`--export-pack`) and re-deploy.
 4. **Switch to full immersion.** Change `UISceneInitialImmersionStyle` from `UIImmersionStyleMixed` to `UIImmersionStyleFull` in `out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist`, then rebuild. The Digital Crown already works to blend in progressive immersion if you change the style key to `UIImmersionStyleProgressive`.
 5. **Add a second cascade tier.** Drop another tilted plate beneath the first at `y=−0.5` rotated `+15°` on X so it catches cubes that fall off the first plate. Coin-pusher feel.
 
 ## Building the engine
 
-The Godot binary in `Godot.app/` is a custom build of [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot) at branch `apple/visionos-xr` plus the `libgodot.a` (xros-arm64) static lib it produces. Building this takes 30–90 minutes on an M1 Max.
+For **hand tracking**, build from [Clancey/godot](https://github.com/Clancey/godot/tree/visionos_interactions_master_rebase) branch `visionos_interactions_master_rebase` (commit `85f0afd`). For **render-only**, build from rsanchezsaez `apple/visionos-xr`. Either way you produce a `Godot.app` editor and a `libgodot.a` (xros-arm64) static lib. Building takes 30–90 minutes on an M1 Max.
+
+**Build the editor and the lib from the same commit.** The editor exports the PCK; the lib runs it. If their Godot versions differ (e.g. exporting with a 4.6.3 editor against a 4.6.2 lib), tokenized GDScript can fail to load at runtime — the app renders nothing but passthrough, with no crash. Two ways to avoid it:
+1. Use a matched editor+lib pair (preferred), **or**
+2. Set `script_export_mode=0` (Text) in `export_presets.cfg` so the runtime compiles scripts from source and the token format no longer has to match. This repo currently uses Text mode because its editor (4.6.3) and lib (Clancey 4.6.2) differ.
 
 Recipe + gotchas documented in detail at:
 - [agile-lens-kb/intelligence/techniques/godot-visionos-xr.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-visionos-xr.md) — full engine-build gotchas, scene-recipe details, `XROrigin3D.current=true` requirement
+- [agile-lens-kb/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md) — engine-fork requirement, the version-gap fix, swap recipe
 - [agile-lens-kb/intelligence/techniques/godot-avp-falling-cascade.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-falling-cascade.md) — this demo's gotchas, perf numbers, code patterns
 
-The `rsanchezsaez-godot/` source tree is `.gitignore`'d here (regenerable from upstream).
+The engine source tree is `.gitignore`'d here (regenerable from the fork above).
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| **Cubes fall and render, but I can't grab anything, and I never got a hand-tracking permission prompt** | You're on the **rsanchezsaez** engine (render-only) — it never requests hand data | Rebuild/link against **Clancey's fork** (commit `85f0afd`). See [Which Godot engine you need](#️-which-godot-engine-you-need-read-this-first) |
+| **App opens but I only see passthrough — no cubes at all** | The main scene's GDScript failed to load (compile error, or a tokenized-script version mismatch between editor and lib) | Run the project headless first: `Godot --headless --path test-project --quit-after 120` and fix any `SCRIPT ERROR`. If editor/lib versions differ, set `script_export_mode=0` (Text). |
+| **`--export-pack` "succeeded" but the app runs old code / nothing changed** | Output path was relative — it resolves from the **project dir**, not your shell's cwd | Use an **absolute** path for the PCK output |
+| **`devicectl install` fails: "unable to locate device"** | AVP is asleep (it sleeps when not worn) | Put the headset on, retry 2–3× |
+| **Cubes render but no permission prompt AND grab still dead after switching engines** | Missing Info.plist privacy strings | Ensure `NSHandsTrackingUsageDescription` + `NSWorldSensingUsageDescription` are in the built bundle (`plutil -extract … <app>/Info.plist`) |
 
 ## Known limitations
 
