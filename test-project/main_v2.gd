@@ -157,14 +157,14 @@ func _setup_hands() -> void:
 		# CollisionShape3D must be added as a child BEFORE the handler enters the tree
 		# so PickupHandler3D._ready() can call _update_detect_range() successfully.
 		var handler := PickupHandler3D.new()
-		handler.detect_range = 0.08   # 8 cm sphere — tight enough for precise pinch, wide enough to catch fast moves
+		handler.detect_range = 0.3   # Marshall's proven value — forgiving enough to grab fast-moving cubes
 		handler.follow_fingertips = true
 		handler.hold_while_hand_tracking_uncertain = true
 
 		var cs := CollisionShape3D.new()
 		cs.name = "CollisionShape3D"  # PickupHandler3D looks up $CollisionShape3D by this exact name
 		var sphere := SphereShape3D.new()
-		sphere.radius = 0.08
+		sphere.radius = 0.3
 		cs.shape = sphere
 		handler.add_child(cs)
 
