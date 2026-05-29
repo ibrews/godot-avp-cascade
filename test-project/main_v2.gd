@@ -70,7 +70,13 @@ func _build_resources():
 	add_child(_flash_light)
 
 func _build_plate(y: float, z: float, x_rot_deg: float) -> void:
-	var plate := StaticBody3D.new()
+	# Grabbable surface: a frozen kinematic body that stays put on release.
+	# Acts exactly like the old StaticBody3D for the cascade, but can be picked up.
+	var plate := PickupAbleBody3D.new()
+	plate.freeze = true
+	plate.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	plate.freeze_on_release = true
+	plate.add_to_group("surface")
 	plate.physics_material_override = _physics_material
 	plate.transform = Transform3D(
 		Basis().rotated(Vector3.RIGHT, deg_to_rad(x_rot_deg)),
@@ -99,7 +105,12 @@ func _build_static_scene():
 	_build_plate(PLATE_HEIGHT - 0.6, FORWARD_Z - 0.35, 15.0)
 
 	# Side deflector — vertical wall to the right, deflects cubes leftward.
-	var wall := StaticBody3D.new()
+	# Also grabbable (frozen kinematic, stays put on release).
+	var wall := PickupAbleBody3D.new()
+	wall.freeze = true
+	wall.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	wall.freeze_on_release = true
+	wall.add_to_group("surface")
 	wall.physics_material_override = _physics_material
 	wall.transform = Transform3D(
 		Basis().rotated(Vector3.UP, deg_to_rad(-25.0)),
@@ -264,6 +275,7 @@ func _spawn_cube():
 		randf_range(-2.5, 2.5),
 		randf_range(-2.5, 2.5)
 	)
+	cube.add_to_group("cube")
 	cube.body_entered.connect(_on_cube_collision.bind(cube))
 	add_child(cube)
 	_active_cubes.append(cube)
@@ -278,11 +290,11 @@ func _on_cube_collision(other_body: Node3D, cube: RigidBody3D):
 	# Flash light at impact point — illuminates plates/wall (PER_PIXEL shading only).
 	_flash_light.position = cube.global_position
 	_flash_energy = 3.5
-	if other_body is RigidBody3D:
+	if other_body.is_in_group("cube"):
 		# Cube-on-cube: high-frequency bright tink.
 		_push_chime(randf_range(700.0, 1500.0), 0.036, false)
 	else:
-		# Cube-on-plate or wall: resonant chime with octave harmonic.
+		# Cube-on-plate/wall (group "surface"): resonant chime with octave harmonic.
 		_push_chime(randf_range(260.0, 700.0), 0.10, true)
 
 func _push_chime(freq: float, duration: float, harmonic: bool):
@@ -303,7 +315,8 @@ func _push_chime(freq: float, duration: float, harmonic: bool):
 		_audio_playback.push_frame(Vector2(s, s))
 
 func _on_kill_entered(body: Node3D):
-	if body is RigidBody3D:
+	# Only despawn falling cubes — never the grabbable plates/wall.
+	if body.is_in_group("cube"):
 		_active_cubes.erase(body)
 		body.queue_free()
 

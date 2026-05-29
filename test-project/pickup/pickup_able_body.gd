@@ -9,6 +9,10 @@ var highlight_material : Material = load("res://shaders/highlight_material.tres"
 var picked_up_by : Area3D
 var closest_areas : Array
 
+# When true, the body stays frozen in place on release instead of falling/throwing.
+# Used for the catch plates and wall so they can be repositioned but don't drop.
+@export var freeze_on_release := false
+
 var original_parent : Node3D
 var tween : Tween
 
@@ -85,9 +89,9 @@ func let_go() -> void:
 		tween.kill()
 		tween = null
 
-	# Compute throw velocity from recent hand movement.
+	# Compute throw velocity from recent hand movement (skipped for stay-put bodies).
 	var throw_velocity := Vector3.ZERO
-	if _pos_history.size() >= 2:
+	if not freeze_on_release and _pos_history.size() >= 2:
 		var newest: Dictionary = _pos_history[-1]
 		var oldest: Dictionary = _pos_history[0]
 		var dt_sec: float = (float(newest["t"]) - float(oldest["t"])) / 1000.0
@@ -106,8 +110,13 @@ func let_go() -> void:
 
 	original_parent.add_child(self)
 	global_transform = current_transform
-	freeze = false
-	linear_velocity = throw_velocity
+
+	if freeze_on_release:
+		# Stay where dropped (plates/wall) — remain a frozen collider, no throw.
+		freeze = true
+	else:
+		freeze = false
+		linear_velocity = throw_velocity
 
 
 # Update our highlight to show that we can be picked up
