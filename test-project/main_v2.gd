@@ -37,6 +37,9 @@ var _flash_light: OmniLight3D
 var _flash_energy := 0.0
 var _active_cubes: Array = []
 var _collision_count := 0
+var _hand_drivers: Array = []
+var _hand_mesh_visible := true
+var _gesture_cooldown := 0.0
 
 func _ready():
 	var interface = XRServer.find_interface("visionOS")
@@ -182,10 +185,26 @@ func _setup_hands() -> void:
 		controller.add_child(handler)
 		xr_origin.add_child(controller)
 
+		var tracker_path := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
+		var driver := HandMeshDriver3D.new()
+		driver.tracker_name = tracker_path
+		driver.is_left = (side == "left_hand")
+		xr_origin.add_child(driver)
+		_hand_drivers.append(driver)
+
 func _process(delta: float):
 	_frame_count += 1
 	_log_timer += delta
 	_spawn_timer += delta
+	_gesture_cooldown = max(0.0, _gesture_cooldown - delta)
+	if _gesture_cooldown <= 0.0:
+		for side in ["left_hand", "right_hand"]:
+			if _is_middle_pinch(side):
+				_hand_mesh_visible = not _hand_mesh_visible
+				for d in _hand_drivers:
+					d.visible = _hand_mesh_visible
+				_gesture_cooldown = 0.8
+				break
 	if _spawn_timer >= SPAWN_INTERVAL:
 		_spawn_timer = 0.0
 		if _active_cubes.size() < MAX_CUBES:
@@ -313,6 +332,29 @@ func _push_chime(freq: float, duration: float, harmonic: bool):
 			# Cube hit: clean sine tink — short, bright, higher register.
 			s = sin(TAU * freq * t) * env * 0.42
 		_audio_playback.push_frame(Vector2(s, s))
+
+func _is_middle_pinch(side: String) -> bool:
+	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
+	var tracker := XRServer.get_tracker(tname)
+	if not tracker is XRHandTracker:
+		return false
+	var ht := tracker as XRHandTracker
+	if not ht.get_has_tracking_data():
+		return false
+	var mid := XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP
+	var thumb := XRHandTracker.HAND_JOINT_THUMB_TIP
+	var idx := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+	var f_mid := int(ht.get_hand_joint_flags(mid))
+	var f_thumb := int(ht.get_hand_joint_flags(thumb))
+	var f_idx := int(ht.get_hand_joint_flags(idx))
+	var tracked := XRHandTracker.HAND_JOINT_FLAG_POSITION_TRACKED
+	if not ((f_mid & tracked) and (f_thumb & tracked) and (f_idx & tracked)):
+		return false
+	var mid_pos := ht.get_hand_joint_transform(mid).origin
+	var thumb_pos := ht.get_hand_joint_transform(thumb).origin
+	var idx_pos := ht.get_hand_joint_transform(idx).origin
+	# Middle-thumb pinch only — exclude index pinch so grabs don't trigger the toggle
+	return mid_pos.distance_to(thumb_pos) < 0.025 and idx_pos.distance_to(thumb_pos) > 0.04
 
 func _on_kill_entered(body: Node3D):
 	# Only despawn falling cubes — never the grabbable plates/wall.
