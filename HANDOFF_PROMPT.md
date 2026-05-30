@@ -6,11 +6,14 @@
 
 ## ⚠️ The single most important thing to know
 
-**The working engine is a borrowed binary that is NOT in git.** Hand tracking only works because we swapped Marshall Nowak's Clancey-fork `libgodot.a` into our xcframework. `libgodot.a` is `.gitignore`'d. **A fresh clone, or any `--export` that regenerates the xcframework, reverts to the rsanchezsaez render-only engine and silently loses hand tracking** (cubes render, nothing grabbable, no permission prompt).
+**The working engine is a borrowed binary that is NOT in git.** Hand tracking only works because we swapped Marshall Nowak's Clancey-fork `libgodot.a` into our xcframework. The whole `GodotVisionPilot.xcframework/` is untracked (this repo is PUBLIC, the lib is borrowed + 181MB, so it must stay out of git). **A fresh clone, or any `--export` that regenerates the xcframework, reverts to the rsanchezsaez render-only engine and silently loses hand tracking** (cubes render, nothing grabbable, no permission prompt).
 
-- Working lib lives at: `out/xcode-visionos/GodotVisionPilot.xcframework/xros-arm64/libgodot.a` (Clancey `visionos_master_pr`, version `4.6.2.rc.custom_build`, build commit `85f0afd`)
+**FIX after a fresh clone or a full export: run `scripts/restore-engine-lib.sh`.** It copies the canonical lib from the local archive into the device slice and verifies the sha256. One command, then rebuild.
+
+- Working/canonical lib sha256: `179446a8434682f197aab1c709e832d1c6ba3b5c7374b36353861613052901fc` (verified on device 2026-05-30 — drives the white skinned hand mesh + grab/throw). This is NEWER than the `85f0afd`/`f86892fe` build the MANIFEST originally described.
+- Working lib lives at: `out/xcode-visionos/GodotVisionPilot.xcframework/xros-arm64/libgodot.a` (Clancey `visionos_master_pr`, `4.6.2.rc.custom_build`)
 - Rollback copy: `out/xcode-visionos/GodotVisionPilot.xcframework/xros-arm64/libgodot.a.rsanchezsaez.bak`
-- Durable archive: `~/godot-engine-bin-archive/clancey-handtracking-4.6.2/` (both slices + MANIFEST). **Still needs offsite/NAS backup — it's the only copy outside Marshall's Desktop.**
+- Durable archive: `~/godot-engine-bin-archive/clancey-handtracking-4.6.2/` — now holds the canonical working lib as `libgodot.a.xros-arm64.WORKING-179446a8` (what the restore script reads) alongside the older `f86892fe` build. **Still needs offsite/NAS backup — it's the only copy outside this Mac's working tree.**
 - Full recipe: KB [`godot-avp-hand-tracking-engine-swap.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md)
 
 ## What's working (verified on device 2026-05-28/29)
