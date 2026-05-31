@@ -15,8 +15,9 @@ device-verified on AVP. **OUTCOME:**
 - Installed lib `f968292d` = ITEM 2 minus foveation experiment (both halves verified separately;
   combined build not re-glanced — only diff is makeConfiguration reverted to stock).
 - Backups: working lib `179446a8` in durable archive + `/tmp/avp_session_backup_dir.txt`.
-- KB + daily + timing all pushed. Public cascade pushed. Fork commit is LOCAL ONLY (not pushed to
-  Marshall's origin — borrowed fork).
+- KB + daily + timing all pushed. Public cascade pushed. Fork source is **James Clancey's**
+  `Clancey/godot:visionos_master_pr` (Marshall supplied the *binary*, but the branch is Clancey's).
+  Our Swift change offered as a POC PR via `ibrews/godot` → `Clancey/godot`.
 
 (historical detail below)
 
