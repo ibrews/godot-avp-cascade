@@ -2,10 +2,31 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
-## ⚠️ STATE (2026-05-30 ~23:30) — READ FIRST
+## ⚠️ STATE (2026-05-31) — READ FIRST
 
-App launches fine. Grab stutter is **ROOT-CAUSED AND FIXED** (device seq 3048).
-Full writeup: KB `intelligence/techniques/godot-avp-grab-follow-stutter.md`.
+Device seq 3088, app **v0.1.1**. WIP committed.
+- **World handle = WORKING & GREAT** (moves XROrigin, not WorldRoot). Ring reset re-centers.
+- **Object grab = still glitchy, and it's POSITIONAL** (user-confirmed). A rotation-damping
+  pass had NO effect → rotation was never the problem. Root cause now known: the handler
+  re-pins its origin to the fingertip in `_physics_process` (60 Hz) while the body rides at
+  90 Hz → 3:2 beat. Telemetry tell: `proc≈450 phys≈300`, `follow_off` swings 0.24–0.34 m.
+  Full analysis + recommended fixes (anchor→_process, or physics_interpolation) + the two new
+  build gotchas: KB `intelligence/techniques/godot-avp-grab-positional-stutter.md`.
+- **NEXT (handed to a fresh chip):** (1) positional stutter fix w/ per-frame pos/rot logging
+  first, (2) two-hand pinch SCALE = scale XROrigin about pinch midpoint, (3) alpha edge
+  blockiness = MSAA_4X / disable VRS_XR, (4) hand meshes drift after world-grab = compensate
+  hand visuals for the XROrigin shift. See HANDOFF_PROMPT.md for the full brief.
+
+### Build gotchas discovered THIS session (both cost time)
+- Validate gate MUST capture stdout (`>/tmp/v.txt 2>&1`) — Godot `print()` boot markers are on
+  STDOUT, errors on STDERR. `2>file` alone sees 0 boot markers → false VALIDATE_FAILED.
+- DerivedData has multiple `GodotVisionPilot-*` dirs; always pick newest (`ls -dt … | head -1`)
+  or you get false PCK-parity mismatch + install failure against a stale bundle.
+
+## ⚠️ Prior state (2026-05-30 ~23:30)
+
+App launches fine. Grab stutter (earlier 4 causes) writeup:
+KB `intelligence/techniques/godot-avp-grab-follow-stutter.md`.
 
 **Object grab is now smooth** — fixed via THREE stacked causes (not the two-hand
 scaler, which was a red herring):

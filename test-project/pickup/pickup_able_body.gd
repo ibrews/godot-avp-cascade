@@ -35,6 +35,15 @@ const _POS_HISTORY_MAX := 6
 
 const PICKUP_SNAP_DURATION := 0.03
 
+# Extreme rotational damping (user-tunable). The held body rides the handler's
+# basis, which carries hand-tracking rotational jitter. We heavily low-pass the
+# WORLD orientation each physics frame. LOWER = more damping/lag; raise toward 1.0
+# to relax (1.0 = no damping, rigid follow). Position is NOT affected — the body
+# still rides the reparented handler at render rate (local origin stays 0).
+const HELD_ROT_DAMP := 0.06
+var _held_rot : Basis = Basis.IDENTITY     # smoothed world orientation while held
+var _held_scale : Vector3 = Vector3.ONE    # preserved so damping never rescales
+
 
 # Called when this object becomes the closest body in an area
 func add_is_closest(area : Area3D) -> void:
@@ -55,13 +64,35 @@ func is_picked_up() -> bool:
 	return picked_up_by != null
 
 
-# Track global position while held so we can throw on release.
+# Track global position while held (for throw velocity) — physics rate is fine here.
 func _physics_process(_delta: float) -> void:
 	if not is_picked_up():
 		return
 	_pos_history.append({"pos": global_position, "t": Time.get_ticks_msec()})
 	if _pos_history.size() > _POS_HISTORY_MAX:
 		_pos_history.pop_front()
+
+# Extreme rotational damping — MUST run at render rate. The body rides the handler's
+# basis at 90 Hz (the reparent ride). If we cancelled that basis in _physics_process
+# (60 Hz), the handler's jitter would leak through on the ~1.5 render frames between
+# physics ticks — which is exactly why the first attempt did nothing. Cancelling here
+# in _process re-imposes the smoothed orientation every rendered frame. Position is
+# untouched: local origin stays 0, so the body still rides the handler position 1:1.
+func _process(_delta: float) -> void:
+	if not is_picked_up():
+		return
+	# Don't fight the brief pickup snap tween (it animates transform → IDENTITY).
+	if tween != null and tween.is_running():
+		return
+	var holder := picked_up_by as Node3D
+	if holder == null:
+		return
+	var holder_basis := holder.global_transform.basis.orthonormalized()
+	_held_rot = _held_rot.slerp(holder_basis, HELD_ROT_DAMP).orthonormalized()
+	var local := transform
+	local.origin = Vector3.ZERO
+	local.basis = (holder_basis.inverse() * _held_rot).scaled(_held_scale)
+	transform = local
 
 
 # Pick this object up.
@@ -92,6 +123,9 @@ func pick_up(pick_up_by) -> void:
 	freeze_mode = FREEZE_MODE_STATIC
 	freeze = true
 	_pos_history.clear()
+	# Seed the rotational-damping state from the orientation/scale at grab time.
+	_held_rot = global_transform.basis.orthonormalized()
+	_held_scale = global_transform.basis.get_scale()
 	_update_highlight()
 
 	# Kill any existing tween and snap to the pinch midpoint (local origin of handler).

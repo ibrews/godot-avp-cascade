@@ -9,7 +9,7 @@ extends Node3D
 
 # Shown on the in-world info panel. Bump on meaningful releases.
 const APP_TITLE := "A Godot Sample by @ibrews"
-const APP_VERSION := "v0.1.0"
+const APP_VERSION := "v0.1.1"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -94,8 +94,8 @@ var _index_pinch_state := {"left_hand": false, "right_hand": false}
 const PINCH_START := 0.024   # must close to here to BEGIN an index pinch (firm pinch)
 const PINCH_END := 0.052     # must open past here to END it (hysteresis gap)
 
-# Simulation pause while the world handle is held, so physics doesn't fight the
-# world transform. Cubes freeze in place; pickup handlers are disabled.
+# Retained only for the _grab_diag readout (always false now): the world handle
+# moves the XROrigin, so no physics ever needs to be frozen.
 var _sim_paused := false
 
 # Scene handle: grab the chrome handlebar to move/scale the whole course.
@@ -110,6 +110,7 @@ var _world_scale_start_dist := 0.0
 var _world_scale_start_scale := Vector3.ONE
 var _world_scale_pivot := Vector3.ZERO  # captured ONCE at scale engage (stable)
 var _world_home: Transform3D = Transform3D.IDENTITY
+var _origin_home: Transform3D = Transform3D.IDENTITY  # XROrigin3D rest pose; the world handle moves the origin, reset restores it
 
 # Immersion toggle (pinky→thumb pinch). Mixed = transparent bg (passthrough);
 # "immersive" = opaque sky drawn by Godot, occluding passthrough. NOTE: this does
@@ -216,6 +217,7 @@ func _build_static_scene():
 	_world_root.name = "WorldRoot"
 	add_child(_world_root)
 	_world_home = _world_root.transform
+	_origin_home = $XROrigin3D.transform
 
 	# Chrome scene handle — sibling of WorldRoot (NOT inside it), so moving the
 	# world never drags the handle out of your hand. Starts right in front of the
@@ -467,9 +469,9 @@ func _process(delta: float):
 				_gesture_cooldown = 0.8
 				break
 
-	_update_scene_handle()  # Re-enabled: handle no longer grabs near grabbables and
-	# _pause_sim no longer disables the pickup handlers (the old stutter cause).
-	# _update_two_hand_scale()  # DISABLED for A/B test — suspected to fight PickupHandler on held objects
+	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
+	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
+	# the origin about the pinch midpoint) is the next step; per-object scale stays off.
 
 	if _spawn_timer >= SPAWN_INTERVAL:
 		_spawn_timer = 0.0
@@ -705,9 +707,12 @@ func _chain_color(chain: int) -> Color:
 	return Color(1.0, 1.0, 1.0)       # white
 
 func _reset_sandbox():
-	# Restore the world transform (handle may have moved/scaled it).
+	# Restore the world transform (legacy; the handle no longer moves it) and the
+	# XROrigin — the world handle now drags the user, so reset must re-center them.
 	if is_instance_valid(_world_root):
 		_world_root.transform = _world_home
+	if has_node("XROrigin3D"):
+		$XROrigin3D.transform = _origin_home
 	_handle_prev_pinch = null
 	_world_scale_start_dist = 0.0
 	# Despawn all cubes.
@@ -879,17 +884,23 @@ func _toggle_immersion() -> void:
 	else:
 		_push_sweep(660.0, 220.0, 0.30)
 
-# Scene handle: grab the chrome bar to translate the whole WorldRoot; hold it +
-# pinch the other hand to scale the whole world about the handle.
+# Scene handle: grab the chrome bar to drag the whole world. Standard VR world-grab —
+# instead of translating the course (which dragged every physics body through the
+# solver and caused jitter), we move the XROrigin3D (the user) the OPPOSITE way. The
+# world stays bit-for-bit fixed in space; only the user's frame moves → identical look,
+# zero physics objects touched. The handle bar and course are both world-fixed, so the
+# hand stays glued to the bar during a drag (its world position is held constant).
 func _update_scene_handle() -> void:
 	if _scene_handle == null or _world_root == null:
 		return
 
-	# --- Acquire / release: the handle is grabbed manually (it is NOT a pickup
-	# body) so it can only be held by an INDEX pinch that STARTS near the bar. ---
+	var origin := $XROrigin3D as Node3D
+
+	# --- Acquire: the handle is grabbed manually (it is NOT a pickup body) so it can
+	# only be held by an INDEX pinch that STARTS near the bar. ---
 	if _handle_held_side == "":
 		for side in ["left_hand", "right_hand"]:
-			var pp: Variant = _index_pinch_point(side)
+			var pp: Variant = _index_pinch_point(side)  # TRACKING space
 			if pp == null:
 				continue
 			# Don't steal a hand that is holding OR about to grab a course object
@@ -898,18 +909,20 @@ func _update_scene_handle() -> void:
 			var h = _hand_handlers.get(side)
 			if h != null and (h.picked_up_body != null or h.closest_body != null):
 				continue
-			if (pp as Vector3).distance_to(_scene_handle.global_position) <= HANDLE_GRAB_DIST:
+			# Pinch is tracking-space; the handle bar lives in world space. Convert via
+			# the origin transform so the on-bar test still holds after a prior drag has
+			# displaced the origin (tracking and world only coincide at origin identity).
+			var pp_world: Vector3 = origin.global_transform * (pp as Vector3)
+			if pp_world.distance_to(_scene_handle.global_position) <= HANDLE_GRAB_DIST:
 				_handle_held_side = side
-				_handle_prev_pinch = pp
-				_world_scale_start_dist = 0.0
+				_handle_prev_pinch = pp  # remember TRACKING-space pinch for the delta
 				_scene_handle.set_held(true)
-				_pause_sim()  # freeze physics so it doesn't fight the world move
 				_append_log("handle grabbed by %s" % side)
 				break
 		return
 
 	# --- Held: confirm the holder still index-pinches, else release. ---
-	var hold_pinch: Variant = _index_pinch_point(_handle_held_side)
+	var hold_pinch: Variant = _index_pinch_point(_handle_held_side)  # TRACKING space
 	if hold_pinch == null:
 		_release_handle()
 		return
@@ -919,38 +932,15 @@ func _update_scene_handle() -> void:
 		_release_handle()
 		return
 
-	# --- Optional scale: other hand index-pinches → scale world about handle. ---
-	var other_side := "right_hand" if _handle_held_side == "left_hand" else "left_hand"
-	var scaling := false
-	if true:
-		var other_pinch: Variant = _index_pinch_point(other_side)
-		if other_pinch != null:
-			var pinch_vec: Vector3 = other_pinch
-			if _world_scale_start_dist <= 0.0:
-				# Capture engage state ONCE; pivot frozen at the handle position.
-				_world_scale_pivot = _scene_handle.global_position
-				_world_scale_start_dist = max(pinch_vec.distance_to(_world_scale_pivot), 0.02)
-				_world_scale_start_scale = _world_root.scale
-			var d: float = pinch_vec.distance_to(_world_scale_pivot)
-			var factor: float = d / _world_scale_start_dist
-			var target: float = clampf(_world_scale_start_scale.x * factor, SCALE_MIN, SCALE_MAX)
-			_scale_world_about(_world_scale_pivot, target)
-			scaling = true
-		else:
-			_world_scale_start_dist = 0.0
-	else:
-		_world_scale_start_dist = 0.0
-
-	# --- Translate: move BOTH handle and world by the holder pinch's delta. ---
+	# --- Translate by moving the USER, not the world. The pinch is in tracking space
+	# (origin-invariant), so the delta is pure physical hand motion; moving the origin
+	# the opposite way slides the whole world with the hand. No feedback: T_cur never
+	# depends on the origin we're changing. ---
 	var cur: Vector3 = hold_pinch
-	if scaling:
-		_handle_prev_pinch = cur  # don't translate while scaling
-	else:
-		if _handle_prev_pinch != null:
-			var delta: Vector3 = cur - (_handle_prev_pinch as Vector3)
-			_scene_handle.global_position += delta
-			_world_root.global_position += delta
-		_handle_prev_pinch = cur
+	if _handle_prev_pinch != null:
+		var d_track: Vector3 = cur - (_handle_prev_pinch as Vector3)
+		origin.global_position -= origin.global_transform.basis * d_track
+	_handle_prev_pinch = cur
 
 func _release_handle() -> void:
 	_handle_held_side = ""
@@ -958,47 +948,6 @@ func _release_handle() -> void:
 	_world_scale_start_dist = 0.0
 	if _scene_handle != null:
 		_scene_handle.set_held(false)
-	_resume_sim()
-
-# Freeze the FALLING cubes in place while the world handle is held so they don't
-# fight the world translation. Deliberately does NOT touch the pickup handlers:
-# disabling them froze any held body's follow and, with spurious handle re-grabs,
-# caused the DISABLED<->INHERIT toggle that made grabs "fight between two positions".
-# Held cubes are skipped (they keep following the hand).
-func _pause_sim() -> void:
-	if _sim_paused:
-		return
-	_sim_paused = true
-	for c in _active_cubes:
-		if is_instance_valid(c) and not c.is_picked_up():
-			c.set_meta("saved_lin", c.linear_velocity)
-			c.set_meta("saved_ang", c.angular_velocity)
-			c.set_meta("paused_by_sim", true)
-			c.freeze = true
-
-func _resume_sim() -> void:
-	if not _sim_paused:
-		return
-	_sim_paused = false
-	for c in _active_cubes:
-		if is_instance_valid(c) and c.get_meta("paused_by_sim", false):
-			c.set_meta("paused_by_sim", false)
-			if not c.is_picked_up():
-				c.freeze = false
-				c.linear_velocity = c.get_meta("saved_lin", Vector3.ZERO)
-				c.angular_velocity = c.get_meta("saved_ang", Vector3.ZERO)
-	for side in _hand_handlers:
-		_hand_handlers[side].process_mode = Node.PROCESS_MODE_INHERIT
-
-# Uniformly scale WorldRoot to `target` while keeping `pivot` fixed in space.
-func _scale_world_about(pivot: Vector3, target: float) -> void:
-	var cur: float = _world_root.scale.x
-	if abs(cur) < 0.0001:
-		return
-	var ratio: float = target / cur
-	var origin: Vector3 = _world_root.global_position
-	_world_root.global_position = pivot + (origin - pivot) * ratio
-	_world_root.scale = Vector3(target, target, target)
 
 # Two-hand scaling: one hand holds a body (PickupHandler3D.picked_up_body),
 # the other hand pinches. While both hold, inter-pinch distance scales the body.
