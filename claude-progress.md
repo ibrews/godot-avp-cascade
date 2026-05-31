@@ -2,6 +2,31 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ⚠️ STATE (2026-05-31, session 3 FULL) — ROADMAP LANDED through v0.5.2-polish — READ FIRST
+
+Device app **v0.5.2-polish**, committed `21c39b6`. This consolidates the engine chip's work
+(next section) PLUS the interactive GDScript work. All device-verified along the way.
+
+**Shipped:** 3D volumetric score text + multi-layer fireworks + boom fanfare; smaller plates;
+grabbable + self-destructing panels (info / leaderboard / instructions — red poke-ball explodes
+each, ring-reset restores); **30s time-attack** (pokable START, click+depress, mid-round press
+cancels-to-neutral → 2nd press restarts) + **global leaderboard** (Google Apps Script GET-submit,
+`tools/leaderboard/`, live `/exec` URL wired into app + index.html); **two-anchor two-hand
+scale+rotate** (glued pinches; both hands pinch object OR world handle; blue outline/handle;
+confirmed great); hand-drift-after-world-drag fix; min grab collider (≥0.10m); cube bloom halos +
+interior lights; **immersive default** + gradual sky dissolve; **real upper-limb toggle** (REAL ARMS
+button + experimental poke-wrist → `user://upper_limb.txt` polled by recompiled engine).
+
+**Alpha blockiness PARKED** (foveation disproven; immersive default = workaround; Epic chat TBD).
+
+**NEXT:** (1) 3-letter high-score entry — AVP keyboard NOT available in immersive CompositorServices;
+build an in-world A–Z poke/dial picker (scores use `PLAYER_INITIALS` const for now). (2) fresh Dev
+Strap screenshot to re-characterise the alpha halo before any engine attempt. (3) future spawned
+chips must run in their OWN worktree — the engine chip ran in-place here and co-edited main_v2.gd
+(merged cleanly by luck). (4) AWAITING Alex's final headset test of v0.5.2 (items 1-6 of the last batch).
+
+---
+
 ## ⚠️ STATE (2026-05-31, session 3) — ENGINE RECOMPILE DONE; ITEM 2 SHIPPED, ITEM 1 DEFERRED
 
 Rebuilt the Clancey fork (`clancey-godot`, branch `visionos_master_pr`). App **v0.5.0-engine**,
