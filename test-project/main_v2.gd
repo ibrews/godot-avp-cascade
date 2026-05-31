@@ -65,6 +65,11 @@ var _collision_count := 0
 var _hand_drivers: Array = []
 var _hand_mesh_visible := true
 var _gesture_cooldown := 0.0
+# Grab-stutter diagnostics: count physics vs render frames to confirm the 90 Hz
+# display / 60 Hz physics beat, and log held/pause/double-grab state per window.
+var _phys_frame_count := 0
+var _last_proc_log := 0
+var _last_phys_log := 0
 
 # --- Sandbox state ---
 var _emitter: SpawnEmitter3D
@@ -384,6 +389,9 @@ func _setup_hands() -> void:
 		xr_origin.add_child(driver)
 		_hand_drivers.append(driver)
 
+func _physics_process(_delta: float) -> void:
+	_phys_frame_count += 1
+
 func _process(delta: float):
 	_frame_count += 1
 	_log_timer += delta
@@ -426,7 +434,7 @@ func _process(delta: float):
 			_spawn_cube()
 	if _log_timer >= 5.0:
 		_log_timer = 0.0
-		_append_log("frames=%d active=%d collisions=%d" % [_frame_count, _active_cubes.size(), _collision_count])
+		_append_log(_grab_diag())
 	if _flash_energy > 0.0:
 		_flash_energy = move_toward(_flash_energy, 0.0, delta * 22.0)
 		_flash_light.light_energy = _flash_energy
@@ -1027,6 +1035,32 @@ func _on_kill_entered(body: Node3D):
 	if body.is_in_group("cube"):
 		_active_cubes.erase(body)
 		body.queue_free()
+
+# Per-window grab diagnostics. proc≈450 & phys≈300 per 5s confirms the 90/60
+# render-vs-physics beat (held body follows in PickupHandler._physics_process).
+# follow_off = distance from the holding handler to its parent controller origin
+# (how far the 90 Hz controller drags the body between 60 Hz re-pins).
+func _grab_diag() -> String:
+	var proc_d := _frame_count - _last_proc_log
+	var phys_d := _phys_frame_count - _last_phys_log
+	_last_proc_log = _frame_count
+	_last_phys_log = _phys_frame_count
+	var lh = _hand_handlers.get("left_hand")
+	var rh = _hand_handlers.get("right_hand")
+	var l_held: bool = lh != null and lh.picked_up_body != null
+	var r_held: bool = rh != null and rh.picked_up_body != null
+	var held_side := ("L" if l_held else "") + ("R" if r_held else "")
+	if held_side == "":
+		held_side = "none"
+	var both_same: bool = l_held and r_held and lh.picked_up_body == rh.picked_up_body
+	var follow_off := 0.0
+	var hh = lh if l_held else (rh if r_held else null)
+	if hh != null:
+		var ctrl = hh.get_parent()
+		if ctrl is Node3D:
+			follow_off = hh.global_position.distance_to((ctrl as Node3D).global_position)
+	return "proc=%d phys=%d held=%s both_same=%s paused=%s follow_off=%.3f active=%d collisions=%d" % [
+		proc_d, phys_d, held_side, str(both_same), str(_sim_paused), follow_off, _active_cubes.size(), _collision_count]
 
 func _write_log(msg: String):
 	var f := FileAccess.open("user://xr_diag.txt", FileAccess.WRITE)
