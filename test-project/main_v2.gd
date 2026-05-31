@@ -9,7 +9,7 @@ extends Node3D
 
 # Shown on the in-world info panel. Bump on meaningful releases.
 const APP_TITLE := "A Godot Sample by @ibrews"
-const APP_VERSION := "v0.2.2-aaoff"
+const APP_VERSION := "v0.2.3-3dscore"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -664,7 +664,9 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 	# Running total + big popup arcing out of the portal mouth.
 	if is_instance_valid(_portal):
 		_portal.add_to_total(total)
-	ScorePopup3D.spawn(self, at + Vector3(0, 0.05, 0), str(total), Color(0.55, 0.95, 1.0), true)
+	# Big cash-out uses the volumetric (extruded, non-billboard) popup so it
+	# stands apart from the flat multiplier popups. Small +N / xN stay flat.
+	BigScorePopup3D.spawn(self, at + Vector3(0, 0.05, 0), str(total), Color(0.55, 0.95, 1.0))
 	_spawn_burst(at, Color(0.40, 0.90, 1.0))
 	_push_score_arpeggio()
 
