@@ -25,7 +25,6 @@ static func _make_outline(color: Color, width: float) -> ShaderMaterial:
 @export var freeze_on_release := false
 
 var original_parent : Node3D
-var tween : Tween
 # Resting freeze mode, restored on release. While held we force STATIC (see pick_up).
 var _saved_freeze_mode : int = FREEZE_MODE_STATIC
 
@@ -33,7 +32,11 @@ var _saved_freeze_mode : int = FREEZE_MODE_STATIC
 var _pos_history : Array = []
 const _POS_HISTORY_MAX := 6
 
-const PICKUP_SNAP_DURATION := 0.03
+# Held-follow smoothing: each physics frame the body damps its LOCAL transform
+# toward the handler origin (identity) rather than snapping. This low-pass-filters
+# hand-tracking jitter so grabbed objects don't shimmy, and makes the on-release
+# pose exactly the smoothed pose on screen. Higher = snappier, less smoothing.
+const FOLLOW_SMOOTH_RATE := 30.0
 
 
 # Called when this object becomes the closest body in an area
@@ -55,10 +58,17 @@ func is_picked_up() -> bool:
 	return picked_up_by != null
 
 
-# Track global position while held so we can throw on release.
-func _physics_process(_delta: float) -> void:
+# Damp toward the handler each physics frame, then record the (smoothed) global
+# position so throw velocity reflects what was actually shown.
+func _physics_process(delta: float) -> void:
 	if not is_picked_up():
 		return
+	var a: float = clampf(1.0 - exp(-FOLLOW_SMOOTH_RATE * delta), 0.0, 1.0)
+	var cur := transform
+	var sc := cur.basis.get_scale()
+	var new_origin := cur.origin.lerp(Vector3.ZERO, a)
+	var new_quat := cur.basis.get_rotation_quaternion().slerp(Quaternion.IDENTITY, a).normalized()
+	transform = Transform3D(Basis(new_quat).scaled(sc), new_origin)
 	_pos_history.append({"pos": global_position, "t": Time.get_ticks_msec()})
 	if _pos_history.size() > _POS_HISTORY_MAX:
 		_pos_history.pop_front()
@@ -93,22 +103,13 @@ func pick_up(pick_up_by) -> void:
 	freeze = true
 	_pos_history.clear()
 	_update_highlight()
-
-	# Kill any existing tween and snap to the pinch midpoint (local origin of handler).
-	if tween:
-		tween.kill()
-	tween = create_tween()
-	tween.tween_property(self, "transform", Transform3D.IDENTITY, PICKUP_SNAP_DURATION)
+	# No snap tween: _physics_process smoothly damps the body to the handler origin.
 
 
 # Let this object go — applies throw velocity from position history.
 func let_go() -> void:
 	if not picked_up_by:
 		return
-
-	if tween:
-		tween.kill()
-		tween = null
 
 	# Compute throw velocity from recent hand movement (skipped for stay-put bodies).
 	var throw_velocity := Vector3.ZERO
@@ -141,6 +142,10 @@ func let_go() -> void:
 	else:
 		freeze = false
 		linear_velocity = throw_velocity
+		# Zero the spin: a frozen body otherwise resumes whatever angular velocity it
+		# had before pickup, which reads as a weird flick on release. Keep the exact
+		# orientation it was let go at.
+		angular_velocity = Vector3.ZERO
 	_update_highlight()
 
 
