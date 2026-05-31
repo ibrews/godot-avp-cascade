@@ -87,12 +87,13 @@ func _burst(col: Color) -> void:
 	shard.material = mat
 
 	var root := get_tree().current_scene
+	var origin_x := _origin_xform()  # joints are tracking-space; render through XROrigin
 	# Shed a shard from each of the 26 joints (whatever is tracked).
 	for j in range(26):
 		var flags := int(ht.get_hand_joint_flags(j))
 		if not (flags & 8):  # POSITION_TRACKED
 			continue
-		var jp: Vector3 = ht.get_hand_joint_transform(j).origin
+		var jp: Vector3 = (origin_x * ht.get_hand_joint_transform(j)).origin
 		var mi := MeshInstance3D.new()
 		mi.mesh = shard
 		root.add_child(mi)
@@ -133,15 +134,29 @@ func _process(_delta: float) -> void:
 	_mesh_root.visible = true
 
 	var world_to_skel := _skeleton.global_transform.affine_inverse()
+	# XRHandTracker joint poses are TRACKING-space (XROrigin-relative). The real
+	# passthrough hand appears in Godot world at XROrigin * joint. Without this the
+	# virtual mesh renders at the un-shifted pose and swims away from the real hand
+	# after a world-handle drag moves the origin. Reduces to identity at origin-home.
+	var origin_x := _origin_xform()
 
 	for bone_idx: int in _bone_to_joint:
 		var joint_idx: int = _bone_to_joint[bone_idx]
 		var flags := int(ht.get_hand_joint_flags(joint_idx))
 		if not (flags & 8):  # HAND_JOINT_FLAG_POSITION_TRACKED = 8
 			continue
-		var t := world_to_skel * ht.get_hand_joint_transform(joint_idx)
+		var t := world_to_skel * (origin_x * ht.get_hand_joint_transform(joint_idx))
 		t.basis = t.basis * _bone_correction  # bone-frame correction (per-hand)
 		_skeleton.set_bone_global_pose_override(bone_idx, t, 1.0, false)
+
+# World transform of the XROrigin this hand renders through (tracking→world).
+func _origin_xform() -> Transform3D:
+	var n: Node = get_parent()
+	while n != null:
+		if n is XROrigin3D:
+			return (n as XROrigin3D).global_transform
+		n = n.get_parent()
+	return Transform3D.IDENTITY
 
 func _build_bone_map() -> void:
 	var sfx := "L" if is_left else "R"

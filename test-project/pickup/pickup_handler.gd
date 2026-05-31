@@ -155,9 +155,22 @@ func _update_anchor_from_hand_tracker() -> void:
 	# already clean (<0.3 mm/frame jitter); a one-euro filter here only added rubber-band
 	# lag against natural hand sway, so it was reverted. Fix A (this running in _process,
 	# not _physics_process) is what removed the 60/90 Hz beat — that's the real fix.
+	# target_position is TRACKING-space (XROrigin-relative); render it through the origin
+	# so the grab anchor (and the held body riding it) stays on the real hand after a
+	# world-handle drag shifts the origin. Reduces to identity at origin-home.
 	var anchor_transform := global_transform
-	anchor_transform.origin = target_position
+	anchor_transform.origin = _origin_xform() * target_position
 	global_transform = anchor_transform
+
+
+# World transform of the XROrigin this handler hangs under (tracking→world).
+func _origin_xform() -> Transform3D:
+	var n: Node = get_parent()
+	while n != null:
+		if n is XROrigin3D:
+			return (n as XROrigin3D).global_transform
+		n = n.get_parent()
+	return Transform3D.IDENTITY
 
 
 # Update our detection range.
