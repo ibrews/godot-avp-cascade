@@ -24,6 +24,8 @@ static func _make_outline(color: Color, width: float) -> ShaderMaterial:
 # Used for the catch plates and wall so they can be repositioned but don't drop.
 @export var freeze_on_release := false
 
+var original_parent : Node3D
+var tween : Tween
 # Resting freeze mode, restored on release. While held we force STATIC (see pick_up).
 var _saved_freeze_mode : int = FREEZE_MODE_STATIC
 
@@ -31,12 +33,7 @@ var _saved_freeze_mode : int = FREEZE_MODE_STATIC
 var _pos_history : Array = []
 const _POS_HISTORY_MAX := 6
 
-# Held-follow smoothing. While held the body is NOT reparented to the handler;
-# instead it damps its own WORLD transform toward the handler's each physics frame
-# (first-order low-pass). This filters hand-tracking jitter — a body rigidly locked
-# as the handler's child inherits every twitch and cannot filter anything. Higher
-# rate = snappier follow / less smoothing; lower = smoother / more lag.
-const FOLLOW_SMOOTH_RATE := 30.0
+const PICKUP_SNAP_DURATION := 0.03
 
 
 # Called when this object becomes the closest body in an area
@@ -58,19 +55,10 @@ func is_picked_up() -> bool:
 	return picked_up_by != null
 
 
-# Damp our WORLD transform toward the handler's each physics frame (position +
-# rotation, scale preserved), then record the smoothed global position so throw
-# velocity reflects what was actually shown.
-func _physics_process(delta: float) -> void:
-	if picked_up_by == null:
+# Track global position while held so we can throw on release.
+func _physics_process(_delta: float) -> void:
+	if not is_picked_up():
 		return
-	var target := picked_up_by.global_transform
-	var gt := global_transform
-	var a: float = clampf(1.0 - exp(-FOLLOW_SMOOTH_RATE * delta), 0.0, 1.0)
-	var sc := gt.basis.get_scale()
-	var new_origin := gt.origin.lerp(target.origin, a)
-	var new_quat := gt.basis.get_rotation_quaternion().slerp(target.basis.get_rotation_quaternion(), a).normalized()
-	global_transform = Transform3D(Basis(new_quat).scaled(sc), new_origin)
 	_pos_history.append({"pos": global_position, "t": Time.get_ticks_msec()})
 	if _pos_history.size() > _POS_HISTORY_MAX:
 		_pos_history.pop_front()
@@ -84,24 +72,43 @@ func pick_up(pick_up_by) -> void:
 			return
 		let_go()
 
-	# We do NOT reparent to the handler — the body stays in place in the world tree
-	# and _physics_process damps its world transform toward the handler each frame.
+	# Remember some state we want to reapply on release.
+	original_parent = get_parent()
+	var current_transform = global_transform
+
+	# Remove us from our old parent.
+	original_parent.remove_child(self)
+
+	# Process our pickup.
 	picked_up_by = pick_up_by
-	# Held bodies use STATIC freeze so our per-frame global_transform writes apply as
-	# clean teleports. KINEMATIC freeze (the course obstacles' resting mode) instead
-	# sweeps the move through the solver one frame late = grab stutter. Cubes already
-	# default to STATIC, which is why they always grabbed smoothly.
+	picked_up_by.add_child(self)
+	global_transform = current_transform
+	# Held bodies MUST use STATIC freeze: the handler rewrites global_transform every
+	# physics frame, and STATIC freeze applies that as a clean teleport. KINEMATIC
+	# freeze (used by the course obstacles at rest) instead sweeps the move through
+	# the solver one frame behind, fighting the handler = grab stutter. Cubes already
+	# default to STATIC, which is why they grab smoothly.
 	_saved_freeze_mode = freeze_mode
 	freeze_mode = FREEZE_MODE_STATIC
 	freeze = true
 	_pos_history.clear()
 	_update_highlight()
 
+	# Kill any existing tween and snap to the pinch midpoint (local origin of handler).
+	if tween:
+		tween.kill()
+	tween = create_tween()
+	tween.tween_property(self, "transform", Transform3D.IDENTITY, PICKUP_SNAP_DURATION)
+
 
 # Let this object go — applies throw velocity from position history.
 func let_go() -> void:
 	if not picked_up_by:
 		return
+
+	if tween:
+		tween.kill()
+		tween = null
 
 	# Compute throw velocity from recent hand movement (skipped for stay-put bodies).
 	var throw_velocity := Vector3.ZERO
@@ -115,10 +122,18 @@ func let_go() -> void:
 			throw_velocity = (new_pos - old_pos) / dt_sec
 	_pos_history.clear()
 
-	# Not reparented while held, so there is nothing to move — the body is already at
-	# its smoothed world pose. Just release and restore the resting freeze mode.
+	# Remember our current transform.
+	var current_transform = global_transform
+
+	# Reparent back to original parent.
+	picked_up_by.remove_child(self)
 	picked_up_by = null
-	freeze_mode = _saved_freeze_mode  # e.g. KINEMATIC for course obstacles
+
+	original_parent.add_child(self)
+	global_transform = current_transform
+
+	# Restore the resting freeze mode (e.g. KINEMATIC for course obstacles).
+	freeze_mode = _saved_freeze_mode
 
 	if freeze_on_release:
 		# Stay where dropped (plates/wall) — remain a frozen collider, no throw.
@@ -126,9 +141,8 @@ func let_go() -> void:
 	else:
 		freeze = false
 		linear_velocity = throw_velocity
-		# Zero the spin: a frozen body otherwise resumes whatever angular velocity it
-		# had before pickup, which reads as a weird flick on release. Keep the exact
-		# orientation it was let go at.
+		# Zero the spin so the body keeps the exact orientation it was let go at
+		# instead of resuming whatever angular velocity it had before being frozen.
 		angular_velocity = Vector3.ZERO
 	_update_highlight()
 
