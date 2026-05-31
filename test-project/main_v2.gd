@@ -8,8 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_TITLE := "A Godot Sample by @ibrews"
-const APP_VERSION := "v0.2.3-3dscore"
+const APP_VERSION := "v0.2.5-grab-touch"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -120,6 +119,14 @@ var _origin_home: Transform3D = Transform3D.IDENTITY  # XROrigin3D rest pose; th
 var _world_env: WorldEnvironment
 var _immersive := false
 var _skybox: MeshInstance3D    # giant inward sphere; toggled to block passthrough
+
+# Info panel: a rigid stack (no per-element billboard — we face the whole panel
+# to the camera each frame so the layers never drift apart). _info_accent pulses
+# gently as a subtle delight flourish.
+var _info_panel_root: Node3D
+var _info_accent: MeshInstance3D
+var _info_accent_mat: StandardMaterial3D
+var _info_panel_t := 0.0
 
 func _ready():
 	var interface = XRServer.find_interface("visionOS")
@@ -379,7 +386,10 @@ func _setup_hands() -> void:
 		controller.tracker = side
 
 		var handler := PickupHandler3D.new()
-		handler.detect_range = 0.3
+		# Require near-contact to grab (was 0.3 = grabbed objects ~30 cm away). The
+		# detect sphere sits at the fingertip midpoint; with the grabbable's own
+		# collider this means you must basically touch a thing to pick it up.
+		handler.detect_range = 0.07
 		handler.follow_fingertips = true
 		handler.hold_while_hand_tracking_uncertain = true
 		# Firm pinch: with the hand-tracked ramp (0.024→0.010 m), 0.85 makes a grab
@@ -410,36 +420,112 @@ func _setup_hands() -> void:
 # Small billboarded title/version panel floating to the user's upper-left. Added to
 # self (not _world_root) so it stays fixed and doesn't move/scale with the handle.
 func _build_info_panel() -> void:
-	var root := Node3D.new()
+	# Grabbable like everything else: a layer-2 (cubes pass through) PickupAbleBody3D
+	# that stays where you place it on release. Faces +Z (toward the user) at rest.
+	var root := PickupAbleBody3D.new()
 	root.name = "InfoPanel"
 	root.position = Vector3(-0.5, 1.55, -0.7)
+	root.collision_layer = LAYER_GRAB_ONLY
+	root.collision_mask = 0
+	root.freeze = true
+	root.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	root.freeze_on_release = true
 	add_child(root)
+	_info_panel_root = root
 
-	# Dark translucent backing quad, billboarded to face the user.
+	# Text stack — title (white), handle (brand orange), version (dim). Rigid (no
+	# per-element billboard); the whole panel faces the camera in _update_info_panel.
+	var title := _panel_label("A Godot Sample", 46, Color(1.0, 1.0, 1.0, 1.0), 10)
+	title.position = Vector3(0.0, 0.034, 0.006)
+	root.add_child(title)
+	var handle := _panel_label("by @ibrews", 40, Color(1.0, 0.55, 0.10, 1.0), 9)
+	handle.position = Vector3(0.0, -0.010, 0.006)
+	root.add_child(handle)
+	var ver := _panel_label(APP_VERSION, 24, Color(0.70, 0.80, 0.92, 0.85), 6)
+	ver.position = Vector3(0.0, -0.044, 0.006)
+	root.add_child(ver)
+
+	# Auto-size the backing to enclose ALL text + padding (no more clipping).
+	var bounds := _union_child_aabb(root)
+	var size_x: float = bounds.size.x + 0.06
+	var size_y: float = bounds.size.y + 0.045
+	var center_y: float = bounds.position.y + bounds.size.y * 0.5
+
+	# Warm accent plate, slightly larger → glowing border around the dark panel.
+	_info_accent_mat = StandardMaterial3D.new()
+	_info_accent_mat.albedo_color = Color(1.0, 0.55, 0.10, 0.32)
+	_info_accent_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_info_accent_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_info_accent_mat.emission_enabled = true
+	_info_accent_mat.emission = Color(1.0, 0.55, 0.10)
+	_info_accent_mat.emission_energy_multiplier = 1.2
+	var accent := MeshInstance3D.new()
+	var aq := QuadMesh.new()
+	aq.size = Vector2(size_x + 0.016, size_y + 0.016)
+	accent.mesh = aq
+	accent.material_override = _info_accent_mat
+	accent.position = Vector3(0.0, center_y, -0.004)
+	root.add_child(accent)
+	_info_accent = accent
+
+	# Dark translucent panel in front of the accent (its margin shows as a border).
 	var bg := MeshInstance3D.new()
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.36, 0.13)
+	quad.size = Vector2(size_x, size_y)
 	bg.mesh = quad
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.04, 0.04, 0.06, 0.72)
+	mat.albedo_color = Color(0.03, 0.03, 0.05, 0.82)
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	bg.material_override = mat
+	bg.position = Vector3(0.0, center_y, 0.0)
 	root.add_child(bg)
 
-	# Title + version, slightly in front of the quad.
-	var label := Label3D.new()
-	label.text = "%s\n%s" % [APP_TITLE, APP_VERSION]
-	label.font_size = 56
-	label.outline_size = 10
-	label.modulate = Color(1.0, 1.0, 1.0, 1.0)
-	label.outline_modulate = Color(0.0, 0.0, 0.0, 0.9)
-	label.pixel_size = 0.00052
-	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.position = Vector3(0.0, 0.0, 0.005)
-	root.add_child(label)
+	# Grab collider covering the panel face (thin box). Layer set on the body above.
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(size_x, size_y, 0.03)
+	cs.shape = box
+	cs.position = Vector3(0.0, center_y, 0.0)
+	root.add_child(cs)
+	_register_grabbable(root)
+
+# A billboard-free Label3D for the info panel (the panel faces the camera as a unit).
+func _panel_label(txt: String, fsize: int, col: Color, outline: int) -> Label3D:
+	var l := Label3D.new()
+	l.text = txt
+	l.font_size = fsize
+	l.outline_size = outline
+	l.modulate = col
+	l.outline_modulate = Color(0.0, 0.0, 0.0, 0.9)
+	l.pixel_size = 0.0005
+	l.shaded = false
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	return l
+
+# Union of the local AABBs (offset by their positions) of a node's VisualInstance3D
+# children — used to size the panel backing to exactly cover the text.
+func _union_child_aabb(parent: Node3D) -> AABB:
+	var acc := AABB()
+	var first := true
+	for child in parent.get_children():
+		if child is VisualInstance3D:
+			var a: AABB = (child as VisualInstance3D).get_aabb()
+			a.position += child.position
+			if first:
+				acc = a
+				first = false
+			else:
+				acc = acc.merge(a)
+	return acc
+
+# Pulse the accent border (subtle delight). The panel itself is now a grabbable
+# placeable object, so we no longer force it to face the camera.
+func _update_info_panel(delta: float) -> void:
+	if _info_accent_mat == null:
+		return
+	_info_panel_t += delta
+	_info_accent_mat.emission_energy_multiplier = 1.0 + 0.5 * (0.5 + 0.5 * sin(_info_panel_t * 2.0))
 
 func _physics_process(_delta: float) -> void:
 	_phys_frame_count += 1
@@ -477,6 +563,7 @@ func _process(delta: float):
 				_gesture_cooldown = 0.8
 				break
 
+	_update_info_panel(delta)
 	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
 	# the origin about the pinch midpoint) is the next step; per-object scale stays off.
