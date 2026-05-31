@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.5.1-grabscale"
+const APP_VERSION := "v0.5.2-polish"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -130,6 +130,7 @@ var _world_env: WorldEnvironment
 var _immersive := false
 var _skybox: MeshInstance3D    # giant inward sphere; toggled to block passthrough
 var _sky_mat: StandardMaterial3D  # stored so the immersion toggle can fade it in/out
+var _glow_tex: GradientTexture2D  # cached soft radial gradient for cube bloom halos
 
 # Info panel: a rigid stack (no per-element billboard — we face the whole panel
 # to the camera each frame so the layers never drift apart). _info_accent pulses
@@ -196,11 +197,11 @@ func _ready():
 		# renders nothing (all passthrough). So foveation stays; if it IS the blockiness,
 		# that's an engine-level tune (can't soften the XR density map from GDScript).
 		viewport.vrs_mode = Viewport.VRS_XR
-		# Mixed-mode blockiness is CompositorServices FOVEATION (coarse rasterization-rate
-		# map → blocky alpha tiles against passthrough). Empirically ruled out from GDScript:
-		# MSAA/SSAA crash boot, VRS_DISABLED renders nothing, FXAA does nothing, no glow/SSAO
-		# in the env. The real fix is engine-level: set configuration.isFoveationEnabled=false
-		# in the fork's app_visionos.swift ContentStageConfiguration. See KB.
+		# Mixed-mode alpha-edge blockiness is UNRESOLVED. Ruled out from GDScript:
+		# MSAA/SSAA crash boot, VRS_DISABLED renders nothing, FXAA does nothing, no glow.
+		# Engine recompile with isFoveationEnabled=false DISPROVED foveation as the cause
+		# (halos unchanged). Parked pending an Epic conversation; immersive mode is the
+		# practical workaround (opaque sky ⇒ no passthrough composite). See KB.
 		# DO NOT touch the XR render buffer here. Both viewport.msaa_3d (MSAA) AND
 		# viewport.scaling_3d_scale (SSAA/supersample) CRASH AT BOOT on the .layered
 		# foveated CompositorServices target — any multisampled OR resized render
@@ -230,6 +231,13 @@ func _ready():
 	_build_leaderboard_panel()
 	_build_instructions_panel()
 	_fetch_leaderboard()
+	# Launch into immersive (opaque sky) by default, not mixed.
+	_immersive = true
+	if _skybox != null:
+		_skybox.visible = true
+	if _sky_mat != null:
+		_sky_mat.albedo_color.a = 1.0
+		_sky_mat.emission_energy_multiplier = 0.8
 	_write_log("Sandbox built; audio ready; hand tracking active")
 
 func _build_resources():
@@ -359,8 +367,10 @@ func _build_static_scene():
 	_sky_mat = StandardMaterial3D.new()
 	_sky_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_sky_mat.cull_mode = BaseMaterial3D.CULL_FRONT  # render inside faces
-	# OPAQUE — it must fully occlude passthrough for immersive mode. (The dissolve
-	# effect is carried by the shard burst, not by fading this material.)
+	# ALPHA so the immersion toggle can DISSOLVE it in/out gradually. Steady immersive
+	# state is alpha=1 (writes opaque alpha → occludes passthrough); the transition
+	# briefly fades alpha alongside the shard burst.
+	_sky_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	# Vertical gradient via a simple emissive deep-space blue; bright enough to lift
 	# the previously-black scene and give metals something to reflect.
 	_sky_mat.albedo_color = Color(0.06, 0.09, 0.18)
@@ -722,6 +732,31 @@ func _spawn_cube():
 	mat.emission_energy_multiplier = emission_e
 	mi.material_override = mat
 	cube.add_child(mi)
+
+	# Soft additive bloom halo (sells "this is emitting light") — billboarded radial
+	# gradient tinted to the cube; softer + more diffuse than the grab outline.
+	var halo := MeshInstance3D.new()
+	halo.name = "Halo"
+	var hq := QuadMesh.new()
+	hq.size = Vector2(size * 4.5, size * 4.5)
+	halo.mesh = hq
+	var hmat := StandardMaterial3D.new()
+	hmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	hmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	hmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	hmat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	hmat.albedo_texture = _get_glow_tex()
+	hmat.albedo_color = Color(color.r, color.g, color.b, 0.55)
+	halo.material_override = hmat
+	cube.add_child(halo)
+
+	# Interior light, same colour as the cube, so it actually casts its hue around.
+	var lite := OmniLight3D.new()
+	lite.light_color = color
+	lite.light_energy = 0.9
+	lite.omni_range = size * 4.0
+	lite.omni_attenuation = 1.6
+	cube.add_child(lite)
 
 	var cs := CollisionShape3D.new()
 	cs.name = "Shape"
@@ -1173,15 +1208,28 @@ func _toggle_immersion() -> void:
 	var cam := get_viewport().get_camera_3d()
 	if cam != null:
 		center = cam.global_position
-	# Opaque sky snaps on/off (so it actually occludes); shards carry the transition.
-	if _skybox != null:
-		_skybox.visible = _immersive
+	# Gradual dissolve/resolve over ~0.8s (like the hands), not a binary snap: fade the
+	# sky alpha + emission while shards converge/scatter. Steady immersive = alpha 1.
 	if _immersive:
-		_shard_burst(center, 2.4, Color(0.45, 0.65, 1.0), false, 40)  # converge
-		_push_sweep(300.0, 900.0, 0.30)                               # rising (hand "show")
+		if _skybox != null:
+			_skybox.visible = true
+		if _sky_mat != null:
+			_sky_mat.albedo_color.a = 0.0
+			var tw := create_tween().set_parallel(true)
+			tw.tween_property(_sky_mat, "albedo_color:a", 1.0, 0.8).set_trans(Tween.TRANS_SINE)
+			tw.tween_property(_sky_mat, "emission_energy_multiplier", 0.8, 0.8)
+		_shard_burst(center, 2.6, Color(0.45, 0.65, 1.0), false, 48)  # converge / materialize
+		_push_sweep(300.0, 900.0, 0.45)                               # rising (hand "show")
 	else:
-		_shard_burst(center, 2.4, Color(0.80, 0.88, 1.0), true, 40)   # outward
-		_push_sweep(900.0, 300.0, 0.30)                               # falling (hand "hide")
+		if _sky_mat != null:
+			var tw := create_tween()
+			tw.set_parallel(true)
+			tw.tween_property(_sky_mat, "albedo_color:a", 0.0, 0.8).set_trans(Tween.TRANS_SINE)
+			tw.tween_property(_sky_mat, "emission_energy_multiplier", 0.0, 0.8)
+			tw.set_parallel(false)
+			tw.tween_callback(func(): if _skybox != null: _skybox.visible = false)
+		_shard_burst(center, 2.6, Color(0.80, 0.88, 1.0), true, 48)   # scatter / dissolve
+		_push_sweep(900.0, 300.0, 0.45)                               # falling (hand "hide")
 
 # Shared shard effect — small emissive cubes that fly outward (dissolve) or
 # converge inward (materialize) around a center. Used by the immersion toggle and
@@ -1315,6 +1363,34 @@ func _index_tip_world(side: String):
 	var origin := $XROrigin3D as Node3D
 	return origin.global_transform * ht.get_hand_joint_transform(idx).origin
 
+# Wrist joint (index 1) of a hand in WORLD space — for the "poke your wrist" toggle.
+func _wrist_world(side: String):
+	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
+	var ht := XRServer.get_tracker(tname) as XRHandTracker
+	if ht == null or not ht.get_has_tracking_data():
+		return null
+	if not (int(ht.get_hand_joint_flags(1)) & 8):  # WRIST, POSITION_TRACKED
+		return null
+	var origin := $XROrigin3D as Node3D
+	return origin.global_transform * ht.get_hand_joint_transform(1).origin
+
+# Cached soft radial gradient (white core → transparent edge) for cube bloom halos.
+func _get_glow_tex() -> GradientTexture2D:
+	if _glow_tex != null:
+		return _glow_tex
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 1.0])
+	g.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 0)])
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.width = 64
+	tex.height = 64
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.5)
+	tex.fill_to = Vector2(0.5, 0.0)
+	_glow_tex = tex
+	return tex
+
 # Abort an in-progress round: flash the button red, settle back to neutral green,
 # and do NOT restart. The player must press again to begin a fresh 30 s.
 func _cancel_round() -> void:
@@ -1431,7 +1507,15 @@ func _update_arms_button(delta: float) -> void:
 		var tip = _index_tip_world(side)
 		if tip != null and (tip as Vector3).distance_to(_arms_button.global_position) <= 0.08:
 			_toggle_real_arms()
-			break
+			return
+	# Also: poke one hand's fingertip onto the OTHER wrist to toggle (experimental).
+	for side in ["left_hand", "right_hand"]:
+		var other := "right_hand" if side == "left_hand" else "left_hand"
+		var tip = _index_tip_world(side)
+		var wrist = _wrist_world(other)
+		if tip != null and wrist != null and (tip as Vector3).distance_to(wrist as Vector3) <= 0.06:
+			_toggle_real_arms()
+			return
 
 func _toggle_real_arms() -> void:
 	_real_arms_visible = not _real_arms_visible
@@ -1583,7 +1667,7 @@ func _build_instructions_panel() -> void:
 	add_child(root)
 
 	var size_x := 0.52
-	var size_y := 0.46
+	var size_y := 0.54
 
 	# Accent + dark backing.
 	var accent_mat := StandardMaterial3D.new()
@@ -1611,21 +1695,21 @@ func _build_instructions_panel() -> void:
 	bg.material_override = bgmat
 	root.add_child(bg)
 
-	var title := _panel_label("HOW TO PLAY", 36, Color(1.0, 0.80, 0.30, 1.0), 8)
-	title.position = Vector3(0, size_y * 0.5 - 0.04, 0.006)
+	var title := _panel_label("HOW TO PLAY", 42, Color(1.0, 0.80, 0.30, 1.0), 9)
+	title.position = Vector3(0, size_y * 0.5 - 0.05, 0.006)
 	root.add_child(title)
 
 	var goal := _panel_label(
-		"Cubes cascade from the emitter.\nGrab & arrange the plates, ramps,\nbubble and goal ring to route\nthem in. Most points in 30s wins!",
-		22, Color(0.92, 0.95, 1.0, 1.0), 5)
-	goal.position = Vector3(0, size_y * 0.5 - 0.135, 0.006)
+		"Cubes pour from the emitter — land\nthem in the goal ring to score.\n\nPOINTS = seconds alive + surface\nhits. Hit several surfaces FAST to\nbuild a chain multiplier (up to x8)!",
+		26, Color(0.92, 0.95, 1.0, 1.0), 6)
+	goal.position = Vector3(0, size_y * 0.5 - 0.20, 0.006)
 	root.add_child(goal)
 
 	var controls := _panel_label(
-		"index pinch    grab & move\nmiddle pinch   show / hide hand mesh\nring pinch     reset everything\npinky pinch    immersive sky\npoke START     30s time attack\npoke ARMS      real arms on / off\ngrab the bar   move the world",
-		20, Color(0.62, 0.92, 1.0, 1.0), 5)
+		"index pinch     grab & move\nBOTH hands      scale + rotate\nmiddle pinch    show / hide hands\nring pinch      reset everything\npinky pinch     immersive sky\npoke START      30s time attack\npoke ARMS       real arms on / off\ngrab the bar    move the world",
+		24, Color(0.62, 0.92, 1.0, 1.0), 6)
 	controls.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	controls.position = Vector3(0, -size_y * 0.5 + 0.10, 0.006)
+	controls.position = Vector3(0, -size_y * 0.5 + 0.18, 0.006)
 	root.add_child(controls)
 
 	# Tiny 3D "diagram" icons flanking the title: a goal ring + a cube.
@@ -1821,6 +1905,8 @@ func _update_two_hand_scale() -> void:
 			_scale_WA = PA   # world points under the pinches, frozen at engage
 			_scale_WB = PB
 			_release_handle()  # take over from any single-hand handle drag
+			if _scene_handle != null and _scene_handle.has_method("set_scaling"):
+				_scene_handle.set_scaling(true)  # blue handle while scaling the world
 		else:
 			_scale_target = obj
 			_scale_T0 = obj.global_transform
@@ -1853,9 +1939,11 @@ func _update_two_hand_scale() -> void:
 		_scale_target.global_transform = Transform3D(lin * _scale_T0.basis, PA + lin * (_scale_T0.origin - _scale_A0))
 
 func _end_scale() -> void:
-	if _scale_active and _scale_target != null and is_instance_valid(_scale_target):
-		if _scale_target.has_method("set_two_hand"):
+	if _scale_active:
+		if _scale_target != null and is_instance_valid(_scale_target) and _scale_target.has_method("set_two_hand"):
 			_scale_target.set_two_hand(false)
+		if _scale_is_world and _scene_handle != null and _scene_handle.has_method("set_scaling"):
+			_scene_handle.set_scaling(false)
 	_scale_active = false
 	_scale_is_world = false
 	_scale_target = null

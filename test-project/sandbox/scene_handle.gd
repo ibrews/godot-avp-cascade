@@ -65,3 +65,14 @@ func set_held(held: bool) -> void:
 	if _ring_mat:
 		_ring_mat.emission_energy_multiplier = 4.0 if held else 1.6
 		_ring_mat.emission = Color(0.5, 1.0, 0.6) if held else Color(0.6, 0.85, 1.0)
+
+# Blue while two-hand scaling/rotating the world (mirrors the object scale outline).
+func set_scaling(on: bool) -> void:
+	if _ring_mat == null:
+		return
+	if on:
+		_ring_mat.emission = Color(0.20, 0.50, 1.0)
+		_ring_mat.emission_energy_multiplier = 6.0
+	else:
+		_ring_mat.emission = Color(0.6, 0.85, 1.0)
+		_ring_mat.emission_energy_multiplier = 1.6
