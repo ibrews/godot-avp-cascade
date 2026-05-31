@@ -2,6 +2,33 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ⚠️ STATE (2026-05-31, session 4) — MIXED-IMMERSION ALPHA HALO FIXED (v0.6.0-depthfix) — READ FIRST
+
+Device app **v0.6.0-depthfix** (repo `ae78f72`). The long-PARKED mixed-immersion blocky
+alpha halo is **fixed** — pure GDScript/shader, NO engine recompile, hand-tracking lib
+`f968292d` untouched (grab/throw intact). Installed on AVP; **awaiting Alex's on-headset
+visual confirmation.**
+
+- **Root cause CONFIRMED (not theory):** CompositorServices requires alpha==0 wherever
+  depth==0. Godot mobile XR uses reverse-Z (depth 0 = nothing drawn); transparent /
+  additive / no-depth-write geometry left nonzero alpha at depth 0 → blocky halo. NOT
+  alpha AA, NOT foveation, NOT MSAA (explains why every AA/MSAA/foveation dead-end failed).
+- **Source:** huisedenanhai, godotengine/godot PR #109975 comment 3418064636 (custom-Metal-
+  AR-renderer contributor, before/after screenshots); fix comment 3446873204, confirmed
+  "worked great" by Godot XR maintainer dsnopek 2026-05-30. Converges with UE commit
+  `7282ab2faf4e` (clears depth swapchain to MIN_flt).
+- **Fix:** `test-project/passthrough_depth_fix.gdshader` — full-screen quad, child of
+  `XRCamera3D`, writes clip-space depth `1e-8` + alpha 0 everywhere via `depth_draw_always`
+  → depth is never exactly 0. `extra_cull_margin=16384` so the camera-child quad isn't
+  frustum-culled (gotcha: a shader that writes clip-space POSITION still gets culled by AABB).
+- Build green: validate 0 err → export → BUILD SUCCEEDED → PCK parity OK → installed.
+- Full writeup + ranked alternatives: KB `intelligence/techniques/godot-avp-alpha-edge-aa.md`.
+- **OPEN:** if a specific object still halos after this, it forces transparency another way →
+  fix #2 (force that object opaque / make it write depth). Fresh Dev Strap screenshot now a
+  confirmation, not a diagnosis.
+
+---
+
 ## ⚠️ STATE (2026-05-31, session 3 FULL) — ROADMAP LANDED through v0.5.2-polish — READ FIRST
 
 Device app **v0.5.2-polish**, committed `21c39b6`. This consolidates the engine chip's work
