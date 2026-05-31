@@ -101,11 +101,11 @@ xcrun devicectl device install app \
 ## Things to Try
 
 1. **Confirm the scene renders at 90 FPS.** Pull diagnostic frame counts after a run: `xcrun devicectl device copy from --device <UDID> --source Documents/xr_diag.txt --destination /tmp/xr_diag.txt --domain-type appDataContainer --domain-identifier com.agilelens.godotvisionpilot`. Per-5s frame deltas should be exactly 450.
-2. **Grab and throw a cube.** Bring your index finger and thumb together (pinch) near any glowing cube — it will highlight yellow and snap to your pinch point. Flick your wrist and release to throw. Try deflecting a cascade of falling cubes.
-3. **Reposition the rig.** The catch plates and deflector wall are grabbable too — pinch one and move it, and it stays where you release it (it won't fall). Redirect the whole cascade mid-stream.
-4. **Change the spawn rate.** Edit `SPAWN_INTERVAL` in `test-project/main_v2.gd`. Try `0.15` for a downpour, `0.8` for a trickle. Re-export the PCK (`--export-pack`) and re-deploy.
-5. **Switch to full immersion.** Change `UISceneInitialImmersionStyle` from `UIImmersionStyleMixed` to `UIImmersionStyleFull` in `out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist`, then rebuild. The Digital Crown already works to blend in progressive immersion if you change the style key to `UIImmersionStyleProgressive`.
-6. **Add a second cascade tier.** Drop another tilted plate beneath the first at `y=−0.5` rotated `+15°` on X so it catches cubes that fall off the first plate. Coin-pusher feel.
+2. **Grab and throw a cube.** Pinch (index + thumb) near any glowing cube — it snaps to your pinch point. Flick your wrist and release to throw it into the goal ring.
+3. **Play the 30-second time attack.** Poke the green **START** button. Land cubes in the goal ring and chain fast surface hits for a multiplier (up to x8). Your score posts to the global leaderboard panel.
+4. **Scale and rotate the whole world.** Pinch the floating chrome handle bar with **both** hands and move them apart / rotate — the world scales and spins around you (the ring turns blue). Pinch any object with both hands to scale just that object (its outline turns blue).
+5. **Use the poke buttons.** Poke **WRIST** to toggle your real arms (Persona passthrough) on/off; poke **MUTE** to silence the sound; poke any panel's red button for a Space-Invaders-style explosion (ring-pinch resets everything).
+6. **Switch immersion.** Pinky-pinch dissolves the sky between full immersion and passthrough mixed reality. Mixed reality composites cleanly over passthrough with no halos (see the depth-bias fix below).
 
 ## Building the engine
 
@@ -137,10 +137,13 @@ The engine source tree is `.gitignore`'d here (regenerable from the fork above).
 ## Known limitations
 
 - **Mobile renderer only.** Forward+ doesn't render on this path. No Lumen/Nanite-equivalent quality.
-- **Hand mesh not rendered.** Visual hand skeleton (`XRHandModifier3D`) is excluded from this build to keep the scene minimal. Only the pickup sphere and fingertip anchor are active.
 - **Manual app launch on the headset.** `xcrun devicectl device process launch` returns `connection invalidated` for immersive-space apps. The user has to tap the icon.
-- **MSAA does not work on this branch yet.** Blocked on Godot PR [#78598](https://github.com/godotengine/godot/pull/78598). Don't enable it.
-- **Hand-as-collision-mesh not yet implemented.** The hand can grab and throw but does not act as a physics collider for passive deflection. The plan is five `AnimatableBody3D` capsules driven by `XRHandTracker` joint positions.
+- **MSAA does not work on this branch yet.** Blocked on Godot PR [#78598](https://github.com/godotengine/godot/pull/78598). Don't enable it. (It's *not* needed for clean passthrough edges — see the depth-bias fix below.)
+- **Hand-as-collision-mesh not yet implemented.** The hand can grab and throw but does not act as a physics collider for passive deflection.
+
+## Mixed-reality passthrough: the blocky-alpha-halo fix
+
+In mixed immersion, visionOS CompositorServices requires **alpha == 0 wherever depth == 0**, or content shows blocky grey/dark halos at its edges over passthrough. Godot's mobile XR path uses reverse-Z (depth 0 = nothing drawn), so transparent / additive / no-depth-write geometry leaves nonzero alpha at depth 0 and trips the artifact. The fix (`test-project/passthrough_depth_fix.gdshader`) is a full-screen quad, child of `XRCamera3D`, that writes a tiny depth (`1e-8`) + alpha 0 everywhere via `depth_draw_always` so depth is never exactly 0 — pure shader, no engine recompile. Confirmed in [Godot PR #109975](https://github.com/godotengine/godot/pull/109975#issuecomment-3446873204) (huisedenanhai's shader, verified by maintainer dsnopek).
 
 ## Credits
 
