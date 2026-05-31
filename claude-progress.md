@@ -2,10 +2,23 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
-## ⚠️ STATE (2026-05-31, session 3) — ENGINE RECOMPILE, AWAITING DEVICE VERIFY
+## ⚠️ STATE (2026-05-31, session 3) — ENGINE RECOMPILE DONE; ITEM 2 SHIPPED, ITEM 1 DEFERRED
 
-Rebuilt the Clancey fork (`clancey-godot`, branch `visionos_master_pr`) to land two
-engine-level items the GDScript app can't do. App **v0.5.0-engine**, installed + launch-sent.
+Rebuilt the Clancey fork (`clancey-godot`, branch `visionos_master_pr`). App **v0.5.0-engine**,
+device-verified on AVP. **OUTCOME:**
+- **ITEM 2 (real-arm runtime toggle): ✅ DONE + device-verified + committed.** (fork local commit
+  0954ef5; cascade pushed 9cd50c8.) Hand tracking preserved (grab/throw confirmed).
+- **ITEM 1A (foveation off): ❌ DISPROVEN on device** (full-rate held 90 FPS, halos unchanged).
+  Reverted to stock. KB `godot-avp-alpha-edge-aa.md` corrected (old foveation verdict was wrong).
+- **ITEM 1B: DEFERRED** (Alex's call). Hypothesis weakened; needs a FRESH Dev Strap screenshot to
+  re-characterize the halo before any Metal-renderer change. Do NOT dive in blind.
+- Installed lib `f968292d` = ITEM 2 minus foveation experiment (both halves verified separately;
+  combined build not re-glanced — only diff is makeConfiguration reverted to stock).
+- Backups: working lib `179446a8` in durable archive + `/tmp/avp_session_backup_dir.txt`.
+- KB + daily + timing all pushed. Public cascade pushed. Fork commit is LOCAL ONLY (not pushed to
+  Marshall's origin — borrowed fork).
+
+(historical detail below)
 
 **What changed (all in `platform/visionos/app_visionos.swift`, one fork rebuild):**
 - **ITEM 1A — foveation OFF.** `makeConfiguration()` now forces `isFoveationEnabled=false`
