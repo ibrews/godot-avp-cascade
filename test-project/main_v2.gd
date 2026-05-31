@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.5.2-polish"
+const APP_VERSION := "v0.5.3-fixes"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -96,6 +96,7 @@ var _scale_WA := Vector3.ZERO   # world points under the pinches at engage — w
 var _scale_WB := Vector3.ZERO
 var _scale_T0: Transform3D = Transform3D.IDENTITY  # target object transform at engage
 var _two_hand_world_active := false  # suppress single-hand handle drag while two-handing the world
+var _prev_grabbed := {"left_hand": false, "right_hand": false}  # for the grab "thunk" SFX
 
 # Per-hand index-pinch hysteresis (true once pinched, stays true until clearly
 # released — kills the grab/release flicker that made grabbing stutter).
@@ -129,7 +130,7 @@ var _origin_home: Transform3D = Transform3D.IDENTITY  # XROrigin3D rest pose; th
 var _world_env: WorldEnvironment
 var _immersive := false
 var _skybox: MeshInstance3D    # giant inward sphere; toggled to block passthrough
-var _sky_mat: StandardMaterial3D  # stored so the immersion toggle can fade it in/out
+var _sky_mat: ShaderMaterial  # dissolve shader; "dissolve" param 0→1 = mixed→immersive
 var _glow_tex: GradientTexture2D  # cached soft radial gradient for cube bloom halos
 
 # Info panel: a rigid stack (no per-element billboard — we face the whole panel
@@ -236,8 +237,7 @@ func _ready():
 	if _skybox != null:
 		_skybox.visible = true
 	if _sky_mat != null:
-		_sky_mat.albedo_color.a = 1.0
-		_sky_mat.emission_energy_multiplier = 0.8
+		_sky_mat.set_shader_parameter("dissolve", 1.0)  # fully resolved = occludes
 	_write_log("Sandbox built; audio ready; hand tracking active")
 
 func _build_resources():
@@ -364,19 +364,29 @@ func _build_static_scene():
 	sky_sphere.height = 16.0
 	sky_sphere.is_hemisphere = false
 	_skybox.mesh = sky_sphere
-	_sky_mat = StandardMaterial3D.new()
-	_sky_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_sky_mat.cull_mode = BaseMaterial3D.CULL_FRONT  # render inside faces
-	# ALPHA so the immersion toggle can DISSOLVE it in/out gradually. Steady immersive
-	# state is alpha=1 (writes opaque alpha → occludes passthrough); the transition
-	# briefly fades alpha alongside the shard burst.
-	_sky_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	# Vertical gradient via a simple emissive deep-space blue; bright enough to lift
-	# the previously-black scene and give metals something to reflect.
-	_sky_mat.albedo_color = Color(0.06, 0.09, 0.18)
-	_sky_mat.emission_enabled = true
-	_sky_mat.emission = Color(0.10, 0.16, 0.32)
-	_sky_mat.emission_energy_multiplier = 0.8
+	# DISSOLVE shader: OPAQUE pipeline (no transparency render_mode) so at dissolve=1 it
+	# writes solid pixels and FULLY OCCLUDES passthrough (= real immersive). The animated
+	# "dissolve" uniform discards a growing fraction of blocky cells, so the sky cells in
+	# (resolve) / out (dissolve) gradually — like the hand shards — without ever being a
+	# translucent material (which does NOT occlude on the visionOS composite).
+	var sky_shader := Shader.new()
+	sky_shader.code = """
+shader_type spatial;
+render_mode unshaded, cull_front;
+uniform float dissolve : hint_range(0.0, 1.0) = 1.0;
+uniform vec3 sky_color : source_color = vec3(0.06, 0.09, 0.18);
+uniform vec3 sky_emis : source_color = vec3(0.10, 0.16, 0.32);
+float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+void fragment() {
+	float n = hash(floor(UV * 56.0));
+	if (n > dissolve) discard;
+	ALBEDO = sky_color;
+	EMISSION = sky_emis * 0.8;
+}
+"""
+	_sky_mat = ShaderMaterial.new()
+	_sky_mat.shader = sky_shader
+	_sky_mat.set_shader_parameter("dissolve", 1.0)
 	_skybox.mesh.surface_set_material(0, _sky_mat)
 	_skybox.position = Vector3(0.0, 1.3, 0.0)
 	_skybox.visible = false
@@ -680,6 +690,7 @@ func _process(delta: float):
 	_update_arms_button(delta)
 	_update_leaderboard(delta)
 	_update_destruct(delta)
+	_update_grab_sound()
 	_update_two_hand_scale()  # both hands pinch → scale world (handle) or held object
 	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
@@ -1208,25 +1219,21 @@ func _toggle_immersion() -> void:
 	var cam := get_viewport().get_camera_3d()
 	if cam != null:
 		center = cam.global_position
-	# Gradual dissolve/resolve over ~0.8s (like the hands), not a binary snap: fade the
-	# sky alpha + emission while shards converge/scatter. Steady immersive = alpha 1.
+	# Gradual cell-dissolve via the sky shader's "dissolve" uniform (0=mixed, 1=immersive
+	# opaque/occluding), like the hand shards — never a translucent material.
 	if _immersive:
 		if _skybox != null:
 			_skybox.visible = true
 		if _sky_mat != null:
-			_sky_mat.albedo_color.a = 0.0
-			var tw := create_tween().set_parallel(true)
-			tw.tween_property(_sky_mat, "albedo_color:a", 1.0, 0.8).set_trans(Tween.TRANS_SINE)
-			tw.tween_property(_sky_mat, "emission_energy_multiplier", 0.8, 0.8)
+			_sky_mat.set_shader_parameter("dissolve", 0.0)
+			var tw := create_tween()
+			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 0.0, 1.0, 0.8).set_trans(Tween.TRANS_SINE)
 		_shard_burst(center, 2.6, Color(0.45, 0.65, 1.0), false, 48)  # converge / materialize
 		_push_sweep(300.0, 900.0, 0.45)                               # rising (hand "show")
 	else:
 		if _sky_mat != null:
 			var tw := create_tween()
-			tw.set_parallel(true)
-			tw.tween_property(_sky_mat, "albedo_color:a", 0.0, 0.8).set_trans(Tween.TRANS_SINE)
-			tw.tween_property(_sky_mat, "emission_energy_multiplier", 0.0, 0.8)
-			tw.set_parallel(false)
+			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 1.0, 0.0, 0.8).set_trans(Tween.TRANS_SINE)
 			tw.tween_callback(func(): if _skybox != null: _skybox.visible = false)
 		_shard_burst(center, 2.6, Color(0.80, 0.88, 1.0), true, 48)   # scatter / dissolve
 		_push_sweep(900.0, 300.0, 0.45)                               # falling (hand "hide")
@@ -1881,20 +1888,28 @@ func _update_two_hand_scale() -> void:
 	var origin := $XROrigin3D as Node3D
 	var PA: Vector3 = origin.global_transform * (pL as Vector3)   # current world pinch L
 	var PB: Vector3 = origin.global_transform * (pR as Vector3)   # current world pinch R
-	var mid := (PA + PB) * 0.5
 
-	# --- Engage: pick a target the first frame both pinches are down near something. ---
+	# --- Engage: BOTH pinches must be AT the target (a hand pinching by your side must
+	# NOT put us in scale mode). World = both pinches on the handle; object = one hand
+	# holds it AND the other pinch is inside/very close to it. ---
 	if not _scale_active:
-		var is_world := _scene_handle != null and mid.distance_to(_scene_handle.global_position) <= 0.28
+		var is_world := _scene_handle != null \
+			and PA.distance_to(_scene_handle.global_position) <= 0.20 \
+			and PB.distance_to(_scene_handle.global_position) <= 0.20
 		var obj: Node3D = null
 		if not is_world:
-			var best := 0.24
-			for b in _grabbables:
-				if is_instance_valid(b) and (b as Node3D).visible:
-					var d := mid.distance_to((b as Node3D).global_position)
-					if d < best:
-						best = d
-						obj = b as Node3D
+			var lh = _hand_handlers.get("left_hand")
+			var rh = _hand_handlers.get("right_hand")
+			var cand: Node3D = null
+			var free_pt := Vector3.ZERO
+			if lh != null and lh.picked_up_body != null and lh.picked_up_body != _scene_handle:
+				cand = lh.picked_up_body
+				free_pt = PB   # left holds → right is the free pinch
+			elif rh != null and rh.picked_up_body != null and rh.picked_up_body != _scene_handle:
+				cand = rh.picked_up_body
+				free_pt = PA   # right holds → left is the free pinch
+			if cand != null and free_pt.distance_to(cand.global_position) <= _obj_reach(cand):
+				obj = cand
 		if not is_world and obj == null:
 			return
 		_scale_active = true
@@ -1948,6 +1963,39 @@ func _end_scale() -> void:
 	_scale_is_world = false
 	_scale_target = null
 	_scaling_body = null
+
+# Approx world-space grab radius of an object (half AABB diagonal × scale + grace),
+# so "free pinch near the object" scales with object size.
+func _obj_reach(n: Node3D) -> float:
+	var r := 0.10
+	for c in n.get_children():
+		if c is VisualInstance3D:
+			var a: AABB = (c as VisualInstance3D).get_aabb()
+			r = maxf(r, a.size.length() * 0.5 * maxf(n.scale.x, 0.2))
+			break
+	return r + 0.10
+
+# Play a soft grounding "thunk" the frame a hand newly grabs a body.
+func _update_grab_sound() -> void:
+	for side in ["left_hand", "right_hand"]:
+		var h = _hand_handlers.get(side)
+		var now: bool = h != null and h.picked_up_body != null
+		if now and not _prev_grabbed.get(side, false):
+			_push_grab()
+		_prev_grabbed[side] = now
+
+func _push_grab() -> void:
+	if _audio_playback == null:
+		return
+	var dur := 0.08
+	var n := int(SAMPLE_RATE * dur)
+	var to_fill: int = min(n, _audio_playback.get_frames_available())
+	for i in range(to_fill):
+		var t := float(i) / SAMPLE_RATE
+		var u := t / dur
+		var f: float = lerp(420.0, 230.0, u)   # quick downward pluck = "caught it"
+		var s := (sin(TAU * f * t) * 0.5 + sin(TAU * f * 0.5 * t) * 0.2) * exp(-13.0 * u)
+		_audio_playback.push_frame(Vector2(s, s))
 
 # Midpoint of index+thumb tips for a hand, or null if not pinching/tracked.
 # Requires full-hand confidence so scaling never engages off a half-seen hand.

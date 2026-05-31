@@ -63,16 +63,24 @@ func _ready() -> void:
 # Brighten the halo when grabbed (called by main_v2).
 func set_held(held: bool) -> void:
 	if _ring_mat:
-		_ring_mat.emission_energy_multiplier = 4.0 if held else 1.6
-		_ring_mat.emission = Color(0.5, 1.0, 0.6) if held else Color(0.6, 0.85, 1.0)
+		if held:
+			_ring_mat.albedo_color = Color(1.0, 0.85, 0.2, 0.9)
+			_ring_mat.emission = Color(1.0, 0.82, 0.15)   # YELLOW when grabbed
+			_ring_mat.emission_energy_multiplier = 6.0
+		else:
+			_ring_mat.albedo_color = Color(0.7, 0.9, 1.0, 0.6)
+			_ring_mat.emission = Color(0.6, 0.85, 1.0)
+			_ring_mat.emission_energy_multiplier = 1.6
 
 # Blue while two-hand scaling/rotating the world (mirrors the object scale outline).
 func set_scaling(on: bool) -> void:
 	if _ring_mat == null:
 		return
 	if on:
-		_ring_mat.emission = Color(0.20, 0.50, 1.0)
-		_ring_mat.emission_energy_multiplier = 6.0
+		_ring_mat.albedo_color = Color(0.3, 0.55, 1.0, 0.9)
+		_ring_mat.emission = Color(0.20, 0.50, 1.0)   # BLUE while scaling
+		_ring_mat.emission_energy_multiplier = 7.0
 	else:
+		_ring_mat.albedo_color = Color(0.7, 0.9, 1.0, 0.6)
 		_ring_mat.emission = Color(0.6, 0.85, 1.0)
 		_ring_mat.emission_energy_multiplier = 1.6
