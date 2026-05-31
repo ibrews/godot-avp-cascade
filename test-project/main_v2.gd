@@ -7,6 +7,10 @@ extends Node3D
 #
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
+# Shown on the in-world info panel. Bump on meaningful releases.
+const APP_TITLE := "A Godot Sample by @ibrews"
+const APP_VERSION := "v0.1.0"
+
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
 const MAX_CUBES := 20
@@ -87,8 +91,8 @@ var _scale_pivot := Vector3.ZERO  # held object's position frozen at engage
 # Per-hand index-pinch hysteresis (true once pinched, stays true until clearly
 # released — kills the grab/release flicker that made grabbing stutter).
 var _index_pinch_state := {"left_hand": false, "right_hand": false}
-const PINCH_START := 0.032   # must close to here to BEGIN an index pinch
-const PINCH_END := 0.060     # must open past here to END it (hysteresis gap)
+const PINCH_START := 0.024   # must close to here to BEGIN an index pinch (firm pinch)
+const PINCH_END := 0.052     # must open past here to END it (hysteresis gap)
 
 # Simulation pause while the world handle is held, so physics doesn't fight the
 # world transform. Cubes freeze in place; pickup handlers are disabled.
@@ -97,7 +101,7 @@ var _sim_paused := false
 # Scene handle: grab the chrome handlebar to move/scale the whole course.
 # Manual grab (the handle is a plain Node3D, NOT a pickup body) so the
 # PickupHandler can never auto-grab it by proximity near the face.
-const HANDLE_GRAB_DIST := 0.18   # pinch must start this close to the handle
+const HANDLE_GRAB_DIST := 0.09   # pinch must start this close to the handle (on-bar only)
 var _world_root: Node3D            # all course objects + spawned cubes live here
 var _scene_handle: SceneHandle3D
 var _handle_held_side := ""        # "", "left_hand", or "right_hand"
@@ -130,6 +134,7 @@ func _ready():
 	_world_env = $WorldEnvironment
 	_build_resources()
 	_build_static_scene()
+	_build_info_panel()
 	_setup_audio()
 	_setup_hands()
 	_write_log("Sandbox built; audio ready; hand tracking active")
@@ -389,6 +394,40 @@ func _setup_hands() -> void:
 		xr_origin.add_child(driver)
 		_hand_drivers.append(driver)
 
+# Small billboarded title/version panel floating to the user's upper-left. Added to
+# self (not _world_root) so it stays fixed and doesn't move/scale with the handle.
+func _build_info_panel() -> void:
+	var root := Node3D.new()
+	root.name = "InfoPanel"
+	root.position = Vector3(-0.5, 1.55, -0.7)
+	add_child(root)
+
+	# Dark translucent backing quad, billboarded to face the user.
+	var bg := MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.36, 0.13)
+	bg.mesh = quad
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.04, 0.04, 0.06, 0.72)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	bg.material_override = mat
+	root.add_child(bg)
+
+	# Title + version, slightly in front of the quad.
+	var label := Label3D.new()
+	label.text = "%s\n%s" % [APP_TITLE, APP_VERSION]
+	label.font_size = 56
+	label.outline_size = 10
+	label.modulate = Color(1.0, 1.0, 1.0, 1.0)
+	label.outline_modulate = Color(0.0, 0.0, 0.0, 0.9)
+	label.pixel_size = 0.00052
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.position = Vector3(0.0, 0.0, 0.005)
+	root.add_child(label)
+
 func _physics_process(_delta: float) -> void:
 	_phys_frame_count += 1
 
@@ -425,10 +464,8 @@ func _process(delta: float):
 				_gesture_cooldown = 0.8
 				break
 
-	# _update_scene_handle()  # DISABLED — telemetry showed it grabs spuriously every
-	# few frames during cube grabs; each grab calls _pause_sim() which toggles the
-	# PickupHandlers' process_mode DISABLED<->INHERIT, freezing/un-freezing the held
-	# cube = "fighting between two positions". Restoring yesterday's smooth path.
+	_update_scene_handle()  # Re-enabled: handle no longer grabs near grabbables and
+	# _pause_sim no longer disables the pickup handlers (the old stutter cause).
 	# _update_two_hand_scale()  # DISABLED for A/B test — suspected to fight PickupHandler on held objects
 
 	if _spawn_timer >= SPAWN_INTERVAL:
@@ -852,9 +889,11 @@ func _update_scene_handle() -> void:
 			var pp: Variant = _index_pinch_point(side)
 			if pp == null:
 				continue
-			# Don't steal a hand that is busy holding a course object.
+			# Don't steal a hand that is holding OR about to grab a course object
+			# (closest_body set = a grabbable is in pickup range). This is what kept
+			# the handle from being grabbed spuriously during every cube grab.
 			var h = _hand_handlers.get(side)
-			if h != null and h.picked_up_body != null:
+			if h != null and (h.picked_up_body != null or h.closest_body != null):
 				continue
 			if (pp as Vector3).distance_to(_scene_handle.global_position) <= HANDLE_GRAB_DIST:
 				_handle_held_side = side
@@ -869,6 +908,11 @@ func _update_scene_handle() -> void:
 	# --- Held: confirm the holder still index-pinches, else release. ---
 	var hold_pinch: Variant = _index_pinch_point(_handle_held_side)
 	if hold_pinch == null:
+		_release_handle()
+		return
+	# If that hand ended up grabbing a course object, yield the handle to the grab.
+	var holder_h = _hand_handlers.get(_handle_held_side)
+	if holder_h != null and holder_h.picked_up_body != null:
 		_release_handle()
 		return
 
@@ -913,30 +957,33 @@ func _release_handle() -> void:
 		_scene_handle.set_held(false)
 	_resume_sim()
 
-# Freeze the simulation while the world handle is held: stop spawning, freeze
-# every active cube in place (saving its velocity), and disable both pickup
-# handlers so a stray pinch can't grab a course object mid-move.
+# Freeze the FALLING cubes in place while the world handle is held so they don't
+# fight the world translation. Deliberately does NOT touch the pickup handlers:
+# disabling them froze any held body's follow and, with spurious handle re-grabs,
+# caused the DISABLED<->INHERIT toggle that made grabs "fight between two positions".
+# Held cubes are skipped (they keep following the hand).
 func _pause_sim() -> void:
 	if _sim_paused:
 		return
 	_sim_paused = true
 	for c in _active_cubes:
-		if is_instance_valid(c):
+		if is_instance_valid(c) and not c.is_picked_up():
 			c.set_meta("saved_lin", c.linear_velocity)
 			c.set_meta("saved_ang", c.angular_velocity)
+			c.set_meta("paused_by_sim", true)
 			c.freeze = true
-	for side in _hand_handlers:
-		_hand_handlers[side].process_mode = Node.PROCESS_MODE_DISABLED
 
 func _resume_sim() -> void:
 	if not _sim_paused:
 		return
 	_sim_paused = false
 	for c in _active_cubes:
-		if is_instance_valid(c):
-			c.freeze = false
-			c.linear_velocity = c.get_meta("saved_lin", Vector3.ZERO)
-			c.angular_velocity = c.get_meta("saved_ang", Vector3.ZERO)
+		if is_instance_valid(c) and c.get_meta("paused_by_sim", false):
+			c.set_meta("paused_by_sim", false)
+			if not c.is_picked_up():
+				c.freeze = false
+				c.linear_velocity = c.get_meta("saved_lin", Vector3.ZERO)
+				c.angular_velocity = c.get_meta("saved_ang", Vector3.ZERO)
 	for side in _hand_handlers:
 		_hand_handlers[side].process_mode = Node.PROCESS_MODE_INHERIT
 
