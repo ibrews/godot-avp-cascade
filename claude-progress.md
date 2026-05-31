@@ -2,31 +2,43 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
-## ⚠️ STATE (2026-05-30 ~21:30) — READ FIRST
+## ⚠️ STATE (2026-05-30 ~23:30) — READ FIRST
 
-App **launches fine** (earlier session note claiming "crashes on startup" was
-WRONG — I fabricated it; ignore). Real open bug: **grabbing ANY object (incl.
-cubes) is stuttery** — "fighting between two positions." This regressed; plain
-cube grab was smooth in earlier builds.
+App launches fine. Grab stutter is **ROOT-CAUSED AND FIXED** (device seq 3048).
+Full writeup: KB `intelligence/techniques/godot-avp-grab-follow-stutter.md`.
 
-**Leading hypothesis (strong):** `_update_two_hand_scale()` runs every frame and,
-whenever one hand holds a body and the other pinches, writes `held.scale` +
-reads position — fighting Marshall's `PickupHandler3D`, which is ALSO driving the
-held body's transform every frame. Two writers → stutter. The scene-handle
-hysteresis fix didn't help because object grab never went through that path; it
-goes through PickupHandler + the scale fighter.
+**Object grab is now smooth** — fixed via THREE stacked causes (not the two-hand
+scaler, which was a red herring):
+1. Scene-handle `_pause_sim()` disabled the PickupHandlers + handle grabbed
+   spuriously → handlers toggled DISABLED↔INHERIT → held body froze/snapped.
+2. Course obstacles were `FREEZE_MODE_KINEMATIC`; held bodies must be STATIC
+   (clean teleport). Now forced STATIC while held, restored on release.
+3. (My own regression, reverted) a "world-space damping" follow in
+   `_physics_process` ran at 60 Hz on a 90 Hz display → judder. Reverted to the
+   reparent design (rides XR controller at 90 Hz = smooth). **NEVER follow a held
+   body in `_physics_process`. For jitter filtering use physics_interpolation.**
 
-**A/B TEST SHIPPED (device seq 2992):** `_update_two_hand_scale()` is commented
-out at its call site (main_v2.gd ~line 410). If cube grab is now SMOOTH →
-confirmed; rebuild two-hand-scale so it does NOT touch a body the PickupHandler
-owns (e.g. only scale when the SAME hand both holds and the gesture is distinct,
-or detach the body from the handler during scale, or scale via a wrapper Node3D
-parent rather than the body itself). If still stuttery → suspect the hand mesh
-(does HandMeshDriver add any collider? it shouldn't — verify) or the
-confidence-gate/pinch readers perturbing handler state.
+**Pinch tightened:** hand-tracked pickup now uses thumb–index TIP distance only
+(~1.2 cm grab / 2.2 cm release); ignores the platform's loose ~2-inch pinch action.
 
-Other possible culprit to check: `_pause_sim()` flips `process_mode` on the
-PickupHandler nodes — if it ever runs spuriously it would disrupt grabs.
+**Info panel added:** billboarded "A Godot Sample by @ibrews" / v0.1.0 (upper-left).
+
+### ⏭️ NEXT (open, queued) — WORLD HANDLE: move the USER, not the world
+The chrome handle STILL freaks everything out: `_update_scene_handle()` translates
+`_world_root.global_position += delta`, dragging every physics body through the
+solver. **Alex's fix (correct, standard VR pattern): move `XROrigin3D` the opposite
+direction instead of moving WorldRoot — looks identical, touches ZERO physics
+objects → no jitter. Scaling = scale the XROrigin, not the assets.** The handle is
+currently RE-ENABLED but broken this way; redesign it to drive XROrigin.
+
+Also open: residual hand-tracking shimmy (try `physics/common/physics_interpolation
+=true`); alpha/blocky mixed-mode edge pixelation (MSAA_4X / disable VRS_XR — never
+addressed).
+
+### Build gotcha (cost time this session)
+Bash cwd PERSISTS between calls. `cd test-project` then a later relative
+`Godot.app/...` resolves from test-project → exit 127 (false "0 errors" on empty
+log). Use ABSOLUTE paths for Godot/--path, or cd to repo root each call.
 
 ## Vision
 Grabbable spawn emitter drops cubes → build a path of grabbable obstacles →
