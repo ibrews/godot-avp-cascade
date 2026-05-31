@@ -26,6 +26,12 @@ class_name PickupHandler3D
 @export var follow_fingertips : bool = true
 @export var hold_while_hand_tracking_uncertain : bool = true
 
+# Hand-tracked pinch geometry: thumb–index TIP distance. Grab begins as the tips
+# close to HAND_PINCH_GRAB (with pickup_press_threshold this needs ~1 cm) and holds
+# until they open past HAND_PINCH_RELEASE (hysteresis).
+const HAND_PINCH_GRAB := 0.010
+const HAND_PINCH_RELEASE := 0.024
+
 var closest_body : PickupAbleBody3D
 var picked_up_body: PickupAbleBody3D
 var was_pickup_pressed : bool = false
@@ -35,15 +41,26 @@ var release_started_msec : int = 0
 # Reads a normalized pickup value from whichever input naming convention
 # the active XR interface provides.
 func _get_pickup_value(controller: XRController3D) -> float:
-	var pickup_value : float = 0.0
+	# Hand tracking present → drive pickup SOLELY from thumb–index TIP distance. The
+	# platform's pinch/grip/primary actions report a pinch from ~2 inches out, far
+	# looser than wanted, so we ignore them on hand input and require the fingertips
+	# to actually meet (~1 cm). This is the firm pinch the user asked for.
+	var hand_tracker := _get_hand_tracker()
+	if hand_tracker != null and hand_tracker.get_has_tracking_data():
+		var index_joint := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+		var thumb_joint := XRHandTracker.HAND_JOINT_THUMB_TIP
+		if _joint_has_tracked_position(hand_tracker, index_joint) and _joint_has_tracked_position(hand_tracker, thumb_joint):
+			var index_tip := hand_tracker.get_hand_joint_transform(index_joint).origin
+			var thumb_tip := hand_tracker.get_hand_joint_transform(thumb_joint).origin
+			var pinch_distance := index_tip.distance_to(thumb_tip)
+			return clampf((HAND_PINCH_RELEASE - pinch_distance) / (HAND_PINCH_RELEASE - HAND_PINCH_GRAB), 0.0, 1.0)
+		return 0.0
 
-	# OpenXR action-map style input first (used by this demo on OpenXR).
+	# Physical-controller fallback: OpenXR action-map + generic aliases.
+	var pickup_value : float = 0.0
 	var mapped_input: Variant = controller.get_input(pickup_action)
 	if mapped_input != null:
 		pickup_value = maxf(pickup_value, controller.get_float(pickup_action))
-
-	# Generic XR controller aliases used by platform-specific interfaces such
-	# as visionOS XR.
 	pickup_value = maxf(pickup_value, controller.get_float("grip"))
 	pickup_value = maxf(pickup_value, controller.get_float("grip_click"))
 	pickup_value = maxf(pickup_value, controller.get_float("select_button"))
@@ -53,21 +70,6 @@ func _get_pickup_value(controller: XRController3D) -> float:
 	pickup_value = maxf(pickup_value, controller.get_float("primary_click"))
 	pickup_value = maxf(pickup_value, controller.get_float("pinch"))
 	pickup_value = maxf(pickup_value, controller.get_float("grasp"))
-
-	# Joint-based pinch fallback helps if action-map values momentarily dip due to tracking jitter.
-	var hand_tracker := _get_hand_tracker()
-	if hand_tracker != null and hand_tracker.get_has_tracking_data():
-		var index_joint := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
-		var thumb_joint := XRHandTracker.HAND_JOINT_THUMB_TIP
-		var has_index := _joint_has_tracked_position(hand_tracker, index_joint)
-		var has_thumb := _joint_has_tracked_position(hand_tracker, thumb_joint)
-		if has_index and has_thumb:
-			var index_tip := hand_tracker.get_hand_joint_transform(index_joint).origin
-			var thumb_tip := hand_tracker.get_hand_joint_transform(thumb_joint).origin
-			var pinch_distance := index_tip.distance_to(thumb_tip)
-			var pinch_value := clampf((0.06 - pinch_distance) / (0.06 - 0.025), 0.0, 1.0)
-			pickup_value = maxf(pickup_value, pinch_value)
-
 	return pickup_value
 
 

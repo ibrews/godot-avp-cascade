@@ -372,6 +372,9 @@ func _setup_hands() -> void:
 		handler.detect_range = 0.3
 		handler.follow_fingertips = true
 		handler.hold_while_hand_tracking_uncertain = true
+		# Firm pinch: with the hand-tracked ramp (0.024→0.010 m), 0.85 makes a grab
+		# begin only when the thumb/index tips are ~1.2 cm apart, releasing near 2.2 cm.
+		handler.pickup_press_threshold = 0.85
 		# Detect both solid bodies (cubes/plates) AND grab-only bodies
 		# (emitter/portal/bubble on layer 2).
 		handler.collision_mask = LAYER_SOLID | LAYER_GRAB_ONLY
