@@ -5,9 +5,20 @@ class_name PickupAbleBody3D
 # from the visionosxr_hand_tracking reference project.
 # Added: throw velocity from recent position history on release.
 
-var highlight_material : Material = load("res://shaders/highlight_material.tres")
+# Two outline states: a soft "candidate" outline when this body is the closest
+# grabbable (pinch now to grab it), and a brighter/thicker "held" outline while
+# it's actually picked up. Both are inverted-hull overlays (highlight_shader).
+var _candidate_material : ShaderMaterial = _make_outline(Color(0.30, 0.80, 1.00, 1.0), 0.018)  # cyan
+var _held_material : ShaderMaterial = _make_outline(Color(0.45, 1.00, 0.55, 1.0), 0.030)        # green, thicker
 var picked_up_by : Area3D
 var closest_areas : Array
+
+static func _make_outline(color: Color, width: float) -> ShaderMaterial:
+	var base := load("res://shaders/highlight_material.tres") as ShaderMaterial
+	var m := base.duplicate() as ShaderMaterial
+	m.set_shader_parameter("outline_color", color)
+	m.set_shader_parameter("outline_width", width)
+	return m
 
 # When true, the body stays frozen in place on release instead of falling/throwing.
 # Used for the catch plates and wall so they can be repositioned but don't drop.
@@ -72,6 +83,7 @@ func pick_up(pick_up_by) -> void:
 	global_transform = current_transform
 	freeze = true
 	_pos_history.clear()
+	_update_highlight()
 
 	# Kill any existing tween and snap to the pinch midpoint (local origin of handler).
 	if tween:
@@ -117,15 +129,17 @@ func let_go() -> void:
 	else:
 		freeze = false
 		linear_velocity = throw_velocity
+	_update_highlight()
 
 
-# Update our highlight to show that we can be picked up
+# Outline state: held > candidate > none. Held = green/thick while picked up;
+# candidate = cyan/thin when this is the closest grabbable; none otherwise.
 func _update_highlight() -> void:
-	if not picked_up_by and not closest_areas.is_empty():
-		for child in get_children():
-			if child is MeshInstance3D:
-				(child as MeshInstance3D).material_overlay = highlight_material
-	else:
-		for child in get_children():
-			if child is MeshInstance3D:
-				(child as MeshInstance3D).material_overlay = null
+	var overlay : Material = null
+	if picked_up_by:
+		overlay = _held_material
+	elif not closest_areas.is_empty():
+		overlay = _candidate_material
+	for child in get_children():
+		if child is MeshInstance3D:
+			(child as MeshInstance3D).material_overlay = overlay
