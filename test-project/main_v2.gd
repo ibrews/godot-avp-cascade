@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.6.0-depthfix"  # passthrough depth-bias quad — mixed-immersion alpha halo fix
+const APP_VERSION := "v0.6.1-features"  # invader-explosion sfx+particles, mute btn, glow 50%, no-collision-while-transform, bluer scale outline, instructions copy
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -168,6 +168,14 @@ var _http: HTTPRequest
 var _arms_button: Node3D
 var _arms_button_label: Label3D
 var _arms_button_mat: StandardMaterial3D
+
+# Mute toggle (sound on/off).
+var _muted := false
+var _mute_button: Node3D
+var _mute_btn_face: Node3D
+var _mute_button_label: Label3D
+var _mute_button_mat: StandardMaterial3D
+var _mute_cooldown := 0.0
 var _arms_btn_face: Node3D
 var _real_arms_visible := false
 var _arms_cooldown := 0.0
@@ -229,6 +237,7 @@ func _ready():
 	_build_start_button()
 	_load_arms_pref()
 	_build_arms_button()
+	_build_mute_button()
 	_build_leaderboard_panel()
 	_build_instructions_panel()
 	_fetch_leaderboard()
@@ -688,6 +697,7 @@ func _process(delta: float):
 	_update_info_panel(delta)
 	_update_timer(delta)
 	_update_arms_button(delta)
+	_update_mute_button(delta)
 	_update_leaderboard(delta)
 	_update_destruct(delta)
 	_update_grab_sound()
@@ -710,7 +720,7 @@ func _process(delta: float):
 func _spawn_cube():
 	var size: float = randf_range(0.06, 0.12)
 	var color: Color = CUBE_PALETTE[randi() % CUBE_PALETTE.size()]
-	var emission_e: float = randf_range(1.2, 3.5)
+	var emission_e: float = randf_range(0.6, 1.75)  # 50% of prior glow (user request)
 
 	var cube := PickupAbleBody3D.new()
 	cube.collision_layer = LAYER_SOLID
@@ -757,7 +767,7 @@ func _spawn_cube():
 	hmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	hmat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	hmat.albedo_texture = _get_glow_tex()
-	hmat.albedo_color = Color(color.r, color.g, color.b, 0.55)
+	hmat.albedo_color = Color(color.r, color.g, color.b, 0.28)  # 50% of prior bloom (user request)
 	halo.material_override = hmat
 	cube.add_child(halo)
 
@@ -1116,6 +1126,29 @@ func _push_score_fanfare():
 			var nt := t - float(ni) * note_dur
 			var nenv := sin(PI * nt / note_dur)
 			s += (sin(TAU * arp[ni] * t) * 0.30 + sin(TAU * arp[ni] * 2.0 * t) * 0.08) * nenv
+		s = clampf(s, -1.0, 1.0)
+		_audio_playback.push_frame(Vector2(s, s))
+
+# Classic Space-Invaders-style explosion for the red destruct buttons: a downward
+# square-wave warble (the "destroyed" buzz) layered with a short noise burst, then
+# a fast decay. Retro and punchy without being a long fanfare.
+func _push_invader_explosion():
+	if _muted or _audio_playback == null:
+		return
+	var dur := 0.34
+	var n := int(SAMPLE_RATE * dur)
+	var to_fill: int = min(n, _audio_playback.get_frames_available())
+	for i in range(to_fill):
+		var t := float(i) / SAMPLE_RATE
+		var u := t / dur
+		# Warble: pitch steps DOWN (220→70 Hz) and the tone is a square wave (8-bit feel).
+		var f: float = lerp(220.0, 70.0, u)
+		var sq: float = 1.0 if sin(TAU * f * t) >= 0.0 else -1.0
+		# Add a fast vibrato so it reads as the classic invader "blip" warble.
+		sq *= 0.6 + 0.4 * sin(TAU * 28.0 * t)
+		var s := sq * exp(-3.2 * u) * 0.5
+		# Noise crack on top, very fast decay.
+		s += (randf() * 2.0 - 1.0) * exp(-9.0 * u) * 0.4
 		s = clampf(s, -1.0, 1.0)
 		_audio_playback.push_frame(Vector2(s, s))
 
@@ -1505,6 +1538,79 @@ func _refresh_arms_label() -> void:
 		_arms_button_mat.emission = Color(0.95, 0.62, 0.20)
 		_arms_button_mat.emission_energy_multiplier = 1.0
 
+# Build the pokable MUTE button (mirror of ARMS, just below it on the left).
+func _build_mute_button() -> void:
+	_mute_button = Node3D.new()
+	_mute_button.name = "MuteButton"
+	_mute_button.position = Vector3(-0.42, 1.08, -0.45)
+	add_child(_mute_button)
+
+	_mute_btn_face = Node3D.new()
+	_mute_button.add_child(_mute_btn_face)
+
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.17, 0.085, 0.03)
+	mi.mesh = bm
+	_mute_button_mat = StandardMaterial3D.new()
+	_mute_button_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	_mute_button_mat.emission_enabled = true
+	mi.material_override = _mute_button_mat
+	_mute_btn_face.add_child(mi)
+
+	_mute_button_label = Label3D.new()
+	_mute_button_label.font_size = 30
+	_mute_button_label.outline_size = 8
+	_mute_button_label.modulate = Color.WHITE
+	_mute_button_label.outline_modulate = Color(0, 0, 0, 0.9)
+	_mute_button_label.pixel_size = 0.0005
+	_mute_button_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mute_button_label.position = Vector3(0, 0, 0.017)
+	_mute_btn_face.add_child(_mute_button_label)
+	_refresh_mute_label()
+
+func _refresh_mute_label() -> void:
+	if _mute_button_label == null or _mute_button_mat == null:
+		return
+	if _muted:
+		_mute_button_label.text = "SOUND\nOFF"
+		_mute_button_mat.albedo_color = Color(0.32, 0.12, 0.12)
+		_mute_button_mat.emission = Color(0.95, 0.30, 0.30)
+		_mute_button_mat.emission_energy_multiplier = 1.0
+	else:
+		_mute_button_label.text = "SOUND\nON"
+		_mute_button_mat.albedo_color = Color(0.12, 0.34, 0.30)
+		_mute_button_mat.emission = Color(0.30, 0.95, 0.70)
+		_mute_button_mat.emission_energy_multiplier = 1.2
+
+# Watch for a finger poke on the MUTE button; toggle sound on/off.
+func _update_mute_button(delta: float) -> void:
+	_mute_cooldown = max(0.0, _mute_cooldown - delta)
+	if _mute_cooldown > 0.0 or _mute_button == null:
+		return
+	for side in ["left_hand", "right_hand"]:
+		var tip = _index_tip_world(side)
+		if tip != null and (tip as Vector3).distance_to(_mute_button.global_position) <= 0.08:
+			_toggle_mute()
+			return
+
+func _toggle_mute() -> void:
+	_muted = not _muted
+	_mute_cooldown = 0.8
+	# Single mute point: drop the shared player to silence (cheaper + total than
+	# gating every synth path). volume restored on unmute.
+	if _shared_audio != null:
+		_shared_audio.volume_db = -80.0 if _muted else -3.0
+	# Depress animation (reuse the press feedback pattern).
+	if _mute_btn_face != null:
+		var tw := create_tween()
+		tw.tween_property(_mute_btn_face, "position", Vector3(0, 0, -0.012), 0.06)
+		tw.tween_property(_mute_btn_face, "position", Vector3.ZERO, 0.12)
+	_refresh_mute_label()
+	# A confirming blip plays only when turning sound back ON (volume already restored).
+	if not _muted:
+		_push_chime(660.0, 0.10, true)
+
 # Watch for a finger poke on the ARMS button; toggle the real-limb preference.
 func _update_arms_button(delta: float) -> void:
 	_arms_cooldown = max(0.0, _arms_cooldown - delta)
@@ -1674,7 +1780,7 @@ func _build_instructions_panel() -> void:
 	add_child(root)
 
 	var size_x := 0.52
-	var size_y := 0.54
+	var size_y := 0.72  # taller: extra START-prompt paragraph + WRIST/MUTE control lines
 
 	# Accent + dark backing.
 	var accent_mat := StandardMaterial3D.new()
@@ -1707,13 +1813,13 @@ func _build_instructions_panel() -> void:
 	root.add_child(title)
 
 	var goal := _panel_label(
-		"Cubes pour from the emitter — land\nthem in the goal ring to score.\n\nPOINTS = seconds alive + surface\nhits. Hit several surfaces FAST to\nbuild a chain multiplier (up to x8)!",
+		"Can you get the most points in 30\nseconds? When you're ready, hit the\ngreen START.\n\nCubes pour from the emitter — land\nthem in the goal ring to score.\n\nPOINTS = seconds alive + surface\nhits. Hit several surfaces FAST to\nbuild a chain multiplier (up to x8)!",
 		26, Color(0.92, 0.95, 1.0, 1.0), 6)
 	goal.position = Vector3(0, size_y * 0.5 - 0.20, 0.006)
 	root.add_child(goal)
 
 	var controls := _panel_label(
-		"index pinch     grab & move\nBOTH hands      scale + rotate\nmiddle pinch    show / hide hands\nring pinch      reset everything\npinky pinch     immersive sky\npoke START      30s time attack\npoke ARMS       real arms on / off\ngrab the bar    move the world",
+		"index pinch     grab & move\nBOTH hands      scale + rotate\nmiddle pinch    show / hide hands\nring pinch      reset everything\npinky pinch     immersive sky\npoke START      30s time attack\npoke WRIST      real arms on / off\npoke MUTE       sound on / off\ngrab the bar    move / scale world",
 		24, Color(0.62, 0.92, 1.0, 1.0), 6)
 	controls.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	controls.position = Vector3(0, -size_y * 0.5 + 0.18, 0.006)
@@ -1797,11 +1903,14 @@ func _update_destruct(delta: float) -> void:
 
 # Explode a panel into shards and hide it (un-grabbable until a reset restores it).
 func _dissolve_panel(panel: Node3D) -> void:
-	_shard_burst(panel.global_position, 0.28, Color(1.0, 0.30, 0.20), true, 32)
+	# Beefier burst: two waves of shards in warm explosion colours + a GPU spark puff.
+	_shard_burst(panel.global_position, 0.40, Color(1.0, 0.55, 0.15), true, 56)
+	_shard_burst(panel.global_position, 0.22, Color(1.0, 0.25, 0.10), true, 40)
+	_spawn_burst(panel.global_position, Color(1.0, 0.45, 0.12))
 	panel.visible = false
 	if panel is CollisionObject3D:
 		(panel as CollisionObject3D).collision_layer = 0
-	_push_sweep(900.0, 240.0, 0.32)
+	_push_invader_explosion()
 
 # Scene handle: grab the chrome bar to drag the whole world. Standard VR world-grab —
 # instead of translating the course (which dragged every physics body through the

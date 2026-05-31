@@ -8,9 +8,9 @@ class_name PickupAbleBody3D
 # Two outline states: a soft "candidate" outline when this body is the closest
 # grabbable (pinch now to grab it), and a brighter/thicker "held" outline while
 # it's actually picked up. Both are inverted-hull overlays (highlight_shader).
-var _candidate_material : ShaderMaterial = _make_outline(Color(0.30, 0.80, 1.00, 1.0), 0.018)  # cyan
-var _held_material : ShaderMaterial = _make_outline(Color(0.45, 1.00, 0.55, 1.0), 0.030)        # green, thicker
-var _scale_material : ShaderMaterial = _make_outline(Color(0.20, 0.50, 1.00, 1.0), 0.034)       # blue, two-hand scale
+var _candidate_material : ShaderMaterial = _make_outline(Color(0.30, 0.80, 1.00, 1.0), 0.024)  # cyan
+var _held_material : ShaderMaterial = _make_outline(Color(0.45, 1.00, 0.55, 1.0), 0.045)        # green, thicker
+var _scale_material : ShaderMaterial = _make_outline(Color(0.15, 0.45, 1.00, 1.0), 0.075)       # BLUE, two-hand scale (thick + saturated so it's unmistakable)
 var picked_up_by : Area3D
 var closest_areas : Array
 
@@ -18,6 +18,8 @@ var closest_areas : Array
 # the single-hand follow is suspended and the body is frozen so physics won't fight it.
 var two_hand := false
 var _saved_two_hand_freeze := true
+var _saved_collision_layer := 0
+var _saved_collision_mask := 0
 
 static func _make_outline(color: Color, width: float) -> ShaderMaterial:
 	var base := load("res://shaders/highlight_material.tres") as ShaderMaterial
@@ -294,14 +296,23 @@ func _update_highlight() -> void:
 			(child as MeshInstance3D).material_overlay = overlay
 
 # Enter/exit external two-hand control: freeze so physics can't fight the driver,
-# turn the outline blue, and restore freeze state on exit.
+# DISABLE collision so the scaling/rotating body doesn't shove (and get shoved by)
+# other bodies — that contact was the jitter while transforming. Turn the outline
+# blue, and restore freeze + collision on exit.
 func set_two_hand(on: bool) -> void:
 	two_hand = on
 	if on:
 		_saved_two_hand_freeze = freeze
 		freeze_mode = FREEZE_MODE_STATIC
 		freeze = true
+		# Phase out of all collision while transformed (restored on exit).
+		_saved_collision_layer = collision_layer
+		_saved_collision_mask = collision_mask
+		collision_layer = 0
+		collision_mask = 0
 	else:
+		collision_layer = _saved_collision_layer
+		collision_mask = _saved_collision_mask
 		freeze = true if freeze_on_release else false
 	_update_highlight()
 
