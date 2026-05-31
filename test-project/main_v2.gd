@@ -418,7 +418,7 @@ func _process(delta: float):
 				break
 
 	_update_scene_handle()
-	_update_two_hand_scale()
+	# _update_two_hand_scale()  # DISABLED for A/B test — suspected to fight PickupHandler on held objects
 
 	if _spawn_timer >= SPAWN_INTERVAL:
 		_spawn_timer = 0.0
