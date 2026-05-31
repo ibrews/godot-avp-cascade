@@ -9,7 +9,7 @@ extends Node3D
 
 # Shown on the in-world info panel. Bump on meaningful releases.
 const APP_TITLE := "A Godot Sample by @ibrews"
-const APP_VERSION := "v0.1.3-fixA"
+const APP_VERSION := "v0.1.4-norotdamp"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
