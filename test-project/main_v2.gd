@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.3.6-aaclean"
+const APP_VERSION := "v0.5.0-engine"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -86,6 +86,16 @@ var _scaling_body: Node3D = null
 var _scale_start_dist := 0.0
 var _scale_start_scale := Vector3.ONE
 var _scale_pivot := Vector3.ZERO  # held object's position frozen at engage
+# Two-anchor (glued-pinch) two-hand transform state.
+var _scale_active := false
+var _scale_is_world := false
+var _scale_target: Node3D = null
+var _scale_A0 := Vector3.ZERO   # world pinch points (L,R) at engage — object case
+var _scale_B0 := Vector3.ZERO
+var _scale_WA := Vector3.ZERO   # world points under the pinches at engage — world case
+var _scale_WB := Vector3.ZERO
+var _scale_T0: Transform3D = Transform3D.IDENTITY  # target object transform at engage
+var _two_hand_world_active := false  # suppress single-hand handle drag while two-handing the world
 
 # Per-hand index-pinch hysteresis (true once pinched, stays true until clearly
 # released — kills the grab/release flicker that made grabbing stutter).
@@ -149,6 +159,17 @@ var _start_cooldown := 0.0
 var _btn_face: Node3D            # mesh+label container that depresses on press
 var _http: HTTPRequest
 
+# Real Persona-arm (upper-limb passthrough) toggle — a pokable button distinct from
+# the virtual GLTF hand mesh (_hand_mesh_visible / middle-pinch). It writes
+# user://upper_limb.txt ("visible"/"hidden"); the recompiled visionOS engine polls
+# that file (~0.5s) and applies it to SwiftUI .upperLimbVisibility live — no relaunch.
+var _arms_button: Node3D
+var _arms_button_label: Label3D
+var _arms_button_mat: StandardMaterial3D
+var _arms_btn_face: Node3D
+var _real_arms_visible := false
+var _arms_cooldown := 0.0
+
 # --- In-world live leaderboard panel (grabbable, like the info panel) ---
 const LB_REFRESH_SEC := 15.0
 const LB_ROWS := 8
@@ -204,6 +225,8 @@ func _ready():
 	_lb_http.request_completed.connect(_on_lb_completed)
 	_load_best()
 	_build_start_button()
+	_load_arms_pref()
+	_build_arms_button()
 	_build_leaderboard_panel()
 	_build_instructions_panel()
 	_fetch_leaderboard()
@@ -644,8 +667,10 @@ func _process(delta: float):
 
 	_update_info_panel(delta)
 	_update_timer(delta)
+	_update_arms_button(delta)
 	_update_leaderboard(delta)
 	_update_destruct(delta)
+	_update_two_hand_scale()  # both hands pinch → scale world (handle) or held object
 	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
 	# the origin about the pinch midpoint) is the next step; per-object scale stays off.
@@ -1335,6 +1360,99 @@ func _refresh_button_label() -> void:
 	else:
 		_start_button_label.text = "START\n30s  ·  best %d" % _best_score
 
+# --- Real Persona-arm (upper-limb passthrough) toggle ----------------------
+# Distinct from the virtual GLTF hand mesh (middle-pinch). This pokable button
+# writes a preference the recompiled engine polls and applies to the SwiftUI
+# .upperLimbVisibility — the real arms fade in/out live, no relaunch needed.
+
+# Sync the button state with any preference persisted from a prior session, so the
+# label matches what the engine will actually show at launch.
+func _load_arms_pref() -> void:
+	if not FileAccess.file_exists("user://upper_limb.txt"):
+		return
+	var f := FileAccess.open("user://upper_limb.txt", FileAccess.READ)
+	if f == null:
+		return
+	var v := f.get_as_text().strip_edges().to_lower()
+	f.close()
+	_real_arms_visible = (v == "visible")
+
+# Build the pokable ARMS button (mirror of START, on the left).
+func _build_arms_button() -> void:
+	_arms_button = Node3D.new()
+	_arms_button.name = "ArmsButton"
+	_arms_button.position = Vector3(-0.42, 1.20, -0.45)
+	add_child(_arms_button)
+
+	_arms_btn_face = Node3D.new()
+	_arms_button.add_child(_arms_btn_face)
+
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.17, 0.085, 0.03)
+	mi.mesh = bm
+	_arms_button_mat = StandardMaterial3D.new()
+	_arms_button_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	_arms_button_mat.emission_enabled = true
+	mi.material_override = _arms_button_mat
+	_arms_btn_face.add_child(mi)
+
+	_arms_button_label = Label3D.new()
+	_arms_button_label.font_size = 30
+	_arms_button_label.outline_size = 8
+	_arms_button_label.modulate = Color.WHITE
+	_arms_button_label.outline_modulate = Color(0, 0, 0, 0.9)
+	_arms_button_label.pixel_size = 0.0005
+	_arms_button_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_arms_button_label.position = Vector3(0, 0, 0.017)
+	_arms_btn_face.add_child(_arms_button_label)
+	_refresh_arms_label()
+
+func _refresh_arms_label() -> void:
+	if _arms_button_label == null or _arms_button_mat == null:
+		return
+	if _real_arms_visible:
+		_arms_button_label.text = "REAL ARMS\nON"
+		_arms_button_mat.albedo_color = Color(0.12, 0.34, 0.50)
+		_arms_button_mat.emission = Color(0.30, 0.75, 1.0)
+		_arms_button_mat.emission_energy_multiplier = 1.2
+	else:
+		_arms_button_label.text = "REAL ARMS\nOFF"
+		_arms_button_mat.albedo_color = Color(0.30, 0.22, 0.10)
+		_arms_button_mat.emission = Color(0.95, 0.62, 0.20)
+		_arms_button_mat.emission_energy_multiplier = 1.0
+
+# Watch for a finger poke on the ARMS button; toggle the real-limb preference.
+func _update_arms_button(delta: float) -> void:
+	_arms_cooldown = max(0.0, _arms_cooldown - delta)
+	if _arms_cooldown > 0.0 or _arms_button == null:
+		return
+	for side in ["left_hand", "right_hand"]:
+		var tip = _index_tip_world(side)
+		if tip != null and (tip as Vector3).distance_to(_arms_button.global_position) <= 0.08:
+			_toggle_real_arms()
+			break
+
+func _toggle_real_arms() -> void:
+	_real_arms_visible = not _real_arms_visible
+	_arms_cooldown = 0.8
+	# user://upper_limb.txt maps to Documents/upper_limb.txt; the engine reads it.
+	var f := FileAccess.open("user://upper_limb.txt", FileAccess.WRITE)
+	if f != null:
+		f.store_string("visible" if _real_arms_visible else "hidden")
+		f.close()
+	_press_arms_button()
+	_refresh_arms_label()
+	# Ascending sweep = arms appearing, descending = arms hiding.
+	_push_sweep(300.0, 900.0, 0.22) if _real_arms_visible else _push_sweep(900.0, 300.0, 0.22)
+
+func _press_arms_button() -> void:
+	_push_click()
+	if _arms_btn_face != null:
+		var tw := create_tween()
+		tw.tween_property(_arms_btn_face, "position:z", -0.018, 0.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.tween_property(_arms_btn_face, "position:z", 0.0, 0.11).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
 # Fire-and-forget GET submit (survives Apps Script's POST→GET redirect).
 func _submit_score(score: int) -> void:
 	if _http == null or LEADERBOARD_URL == "":
@@ -1504,7 +1622,7 @@ func _build_instructions_panel() -> void:
 	root.add_child(goal)
 
 	var controls := _panel_label(
-		"index pinch    grab & move\nmiddle pinch   show / hide hands\nring pinch     reset everything\npinky pinch    immersive sky\npoke START     30s time attack\ngrab the bar   move the world",
+		"index pinch    grab & move\nmiddle pinch   show / hide hand mesh\nring pinch     reset everything\npinky pinch    immersive sky\npoke START     30s time attack\npoke ARMS      real arms on / off\ngrab the bar   move the world",
 		20, Color(0.62, 0.92, 1.0, 1.0), 5)
 	controls.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	controls.position = Vector3(0, -size_y * 0.5 + 0.10, 0.006)
@@ -1603,6 +1721,8 @@ func _dissolve_panel(panel: Node3D) -> void:
 func _update_scene_handle() -> void:
 	if _scene_handle == null or _world_root == null:
 		return
+	if _two_hand_world_active:
+		return  # two-hand glued transform owns the origin this frame
 
 	var origin := $XROrigin3D as Node3D
 
@@ -1659,64 +1779,86 @@ func _release_handle() -> void:
 	if _scene_handle != null:
 		_scene_handle.set_held(false)
 
-# Two-hand scaling: one hand holds a body (PickupHandler3D.picked_up_body),
-# the other hand pinches. While both hold, inter-pinch distance scales the body.
+# Two-hand "glued anchor" transform: BOTH hands index-pinch two points and those
+# points stay locked to the same world spots, so scale + rotation + translation all
+# fall out of how the two anchors move (standard VR two-hand manipulation):
+#   • Both pinches near the world handle → transform the XROrigin so the grabbed
+#     world points stay under the hands (hands apart ⇒ world bigger; rotate the
+#     inter-hand axis ⇒ world rotates). Worked in tracking space ⇒ no feedback.
+#   • Both pinches near a grabbable → apply the same similarity to THAT object; the
+#     two pinched points stay glued to it. Outline turns BLUE while active.
 func _update_two_hand_scale() -> void:
-	var left_handler = _hand_handlers.get("left_hand")
-	var right_handler = _hand_handlers.get("right_hand")
-	if left_handler == null or right_handler == null:
+	_two_hand_world_active = false
+	var pL: Variant = _index_pinch_point("left_hand")    # tracking space
+	var pR: Variant = _index_pinch_point("right_hand")
+	if pL == null or pR == null:
 		_end_scale()
 		return
+	var origin := $XROrigin3D as Node3D
+	var PA: Vector3 = origin.global_transform * (pL as Vector3)   # current world pinch L
+	var PB: Vector3 = origin.global_transform * (pR as Vector3)   # current world pinch R
+	var mid := (PA + PB) * 0.5
 
-	# Identify which hand holds a scalable body and whether the other is pinching.
-	var held: Node3D = null
-	var holder_side := ""
-	if left_handler.picked_up_body != null:
-		held = left_handler.picked_up_body
-		holder_side = "left_hand"
-	elif right_handler.picked_up_body != null:
-		held = right_handler.picked_up_body
-		holder_side = "right_hand"
+	# --- Engage: pick a target the first frame both pinches are down near something. ---
+	if not _scale_active:
+		var is_world := _scene_handle != null and mid.distance_to(_scene_handle.global_position) <= 0.28
+		var obj: Node3D = null
+		if not is_world:
+			var best := 0.24
+			for b in _grabbables:
+				if is_instance_valid(b) and (b as Node3D).visible:
+					var d := mid.distance_to((b as Node3D).global_position)
+					if d < best:
+						best = d
+						obj = b as Node3D
+		if not is_world and obj == null:
+			return
+		_scale_active = true
+		_scale_is_world = is_world
+		_scale_A0 = PA
+		_scale_B0 = PB
+		if is_world:
+			_scale_WA = PA   # world points under the pinches, frozen at engage
+			_scale_WB = PB
+			_release_handle()  # take over from any single-hand handle drag
+		else:
+			_scale_target = obj
+			_scale_T0 = obj.global_transform
+			if obj.has_method("set_two_hand"):
+				obj.set_two_hand(true)
 
-	if held == null:
-		_end_scale()
-		return
-
-	# The scene handle is scaled by _update_scene_handle (scales the world, not
-	# the handle itself) — don't let the per-object scaler grab it.
-	if held == _scene_handle:
-		_end_scale()
-		return
-
-	var other_side := "right_hand" if holder_side == "left_hand" else "left_hand"
-	# Only an INDEX→thumb pinch on the free hand drives scaling.
-	var other_pinch_pos: Variant = _index_pinch_point(other_side)
-	if other_pinch_pos == null:
-		_end_scale()
-		return
-
-	var pinch_vec: Vector3 = other_pinch_pos
-
-	if _scaling_body != held:
-		# Engage only if the free pinch starts near the held object. Capture the
-		# reference distance ONCE (held object's position at engage), so a moving
-		# held hand doesn't create a runaway feedback loop.
-		var engage_dist: float = pinch_vec.distance_to(held.global_position)
-		if engage_dist > SCALE_ENGAGE_DIST:
+	# --- Apply. ---
+	if _scale_is_world:
+		_two_hand_world_active = true
+		var vt: Vector3 = (pR as Vector3) - (pL as Vector3)          # tracking (current)
+		var vw: Vector3 = _scale_WB - _scale_WA                      # world (frozen)
+		if vt.length() < 0.01 or vw.length() < 0.001:
+			return
+		var s: float = clampf(vw.length() / vt.length(), SCALE_MIN, SCALE_MAX)
+		var rot := Basis(Quaternion(vt.normalized(), vw.normalized()))
+		var lin := rot * s
+		# O1*pL = WA exactly (left pinch glued); pR≈WB when unclamped.
+		origin.global_transform = Transform3D(lin, _scale_WA - lin * (pL as Vector3))
+	else:
+		if not is_instance_valid(_scale_target):
 			_end_scale()
 			return
-		_scaling_body = held
-		_scale_start_dist = max(engage_dist, 0.02)
-		_scale_start_scale = held.scale
-		_scale_pivot = held.global_position
-
-	# Measure against the FROZEN pivot, not the live held position.
-	var dist: float = pinch_vec.distance_to(_scale_pivot)
-	var factor: float = dist / _scale_start_dist
-	var target: float = clampf(_scale_start_scale.x * factor, SCALE_MIN, SCALE_MAX)
-	held.scale = Vector3(target, target, target)
+		var v0: Vector3 = _scale_B0 - _scale_A0
+		var v1: Vector3 = PB - PA
+		if v0.length() < 0.001 or v1.length() < 0.001:
+			return
+		var s: float = clampf(v1.length() / v0.length(), SCALE_MIN, SCALE_MAX)
+		var rot := Basis(Quaternion(v0.normalized(), v1.normalized()))
+		var lin := rot * s
+		_scale_target.global_transform = Transform3D(lin * _scale_T0.basis, PA + lin * (_scale_T0.origin - _scale_A0))
 
 func _end_scale() -> void:
+	if _scale_active and _scale_target != null and is_instance_valid(_scale_target):
+		if _scale_target.has_method("set_two_hand"):
+			_scale_target.set_two_hand(false)
+	_scale_active = false
+	_scale_is_world = false
+	_scale_target = null
 	_scaling_body = null
 
 # Midpoint of index+thumb tips for a hand, or null if not pinching/tracked.

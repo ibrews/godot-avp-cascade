@@ -2,6 +2,47 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ⚠️ STATE (2026-05-31, session 3) — ENGINE RECOMPILE, AWAITING DEVICE VERIFY
+
+Rebuilt the Clancey fork (`clancey-godot`, branch `visionos_master_pr`) to land two
+engine-level items the GDScript app can't do. App **v0.5.0-engine**, installed + launch-sent.
+
+**What changed (all in `platform/visionos/app_visionos.swift`, one fork rebuild):**
+- **ITEM 1A — foveation OFF.** `makeConfiguration()` now forces `isFoveationEnabled=false`
+  + non-foveated layout (behind `let godotEnableFoveation=false`, flip to revert).
+  Hypothesis: foveation rasterization-rate map is what coarsens the mixed-mode alpha
+  halos. MUST verify on device: (a) halos gone, (b) FPS still 90 (xr_diag delta ~450).
+- **ITEM 2 — real-arm runtime toggle.** New `UpperLimbVisibilityModel: ObservableObject`
+  (@MainActor, @Published) polls `Documents/upper_limb.txt` every 0.5s on the main actor;
+  Scene reads `limbModel.visibility` via `@StateObject` so `.upperLimbVisibility` re-applies
+  LIVE (no relaunch). File-first → Info.plist key → controller → .automatic. Used
+  ObservableObject NOT @Observable (the hand-rolled `swift-frontend -c` build has no macro
+  plugin paths; @Observable won't expand). CompositorContent has no `.task`, hence the model.
+- **GDScript (`main_v2.gd`):** new pokable **ARMS** button (left, mirror of START) writes
+  `user://upper_limb.txt`; `_load_arms_pref` syncs label at launch; instructions panel updated;
+  middle-pinch relabeled "hand mesh" to keep virtual-mesh vs real-arms distinct. APP_VERSION
+  bumped v0.4.0-scale → v0.5.0-engine.
+
+**SAFETY / borrowed-binary status:**
+- WORKING lib sha `179446a8` backed up (durable archive + session backup dir in
+  `/tmp/avp_session_backup_dir.txt`). New lib sha `362c28d2`, swapped into xcframework
+  device slice ONLY (sim slice untouched). Restore via `scripts/restore-engine-lib.sh`
+  if hand tracking breaks.
+- `bin/libgodot.visionos.template_debug.arm64.a` was byte-identical to the WORKING lib
+  before this build; `obj/` is a complete prior build (7483 .o) so this was an INCREMENTAL
+  relink — only `app_visionos.swift` recompiled, all C++ hand-tracking objects reused →
+  hand tracking SHOULD be preserved. **Verify on device.**
+
+**DEVICE VERIFY CHECKLIST (Alex, headset on):**
+1. Hand tracking + grab/throw still work (white GLTF hands track, cubes grabbable). If
+   NOT → `bash scripts/restore-engine-lib.sh` + rebuild, engine rebuild reverted.
+2. Mixed-mode alpha halos GONE around cubes/hands/panels (ITEM 1A win).
+3. xr_diag frame delta ~450/5s = 90 FPS held (foveation-off didn't tank GPU). If <450 →
+   ITEM 1A too costly, flip `godotEnableFoveation=true`, fall back to ITEM 1B.
+4. Poke ARMS button → real Persona arms fade ON; poke again → OFF (live, no relaunch).
+
+NOTHING committed yet — gated on device verify. KB writes + commits + timing log pending.
+
 ## ⚠️ STATE (2026-05-31, session 2) — READ FIRST
 
 Device app **v0.1.8-smooth** (seq 3140). AWAITING headset feel-test.
