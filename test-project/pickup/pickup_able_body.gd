@@ -10,8 +10,14 @@ class_name PickupAbleBody3D
 # it's actually picked up. Both are inverted-hull overlays (highlight_shader).
 var _candidate_material : ShaderMaterial = _make_outline(Color(0.30, 0.80, 1.00, 1.0), 0.018)  # cyan
 var _held_material : ShaderMaterial = _make_outline(Color(0.45, 1.00, 0.55, 1.0), 0.030)        # green, thicker
+var _scale_material : ShaderMaterial = _make_outline(Color(0.20, 0.50, 1.00, 1.0), 0.034)       # blue, two-hand scale
 var picked_up_by : Area3D
 var closest_areas : Array
+
+# While true, an external driver (main_v2 two-hand scale) owns this body's transform;
+# the single-hand follow is suspended and the body is frozen so physics won't fight it.
+var two_hand := false
+var _saved_two_hand_freeze := true
 
 static func _make_outline(color: Color, width: float) -> ShaderMaterial:
 	var base := load("res://shaders/highlight_material.tres") as ShaderMaterial
@@ -118,6 +124,8 @@ func _physics_process(_delta: float) -> void:
 # Render rate, so it tracks the 90 Hz display. Replaces both the old 1:1 reparent ride
 # (too raw — "electric") and the pickup snap tween (the filter eases in the grab itself).
 func _process(delta: float) -> void:
+	if two_hand:
+		return  # main_v2 two-hand scale owns the transform this frame
 	if not is_picked_up():
 		return
 	var holder := picked_up_by as Node3D
@@ -275,13 +283,27 @@ func let_go() -> void:
 # candidate = cyan/thin when this is the closest grabbable; none otherwise.
 func _update_highlight() -> void:
 	var overlay : Material = null
-	if picked_up_by:
+	if two_hand:
+		overlay = _scale_material            # blue — two-hand scale/rotate
+	elif picked_up_by:
 		overlay = _held_material
 	elif not closest_areas.is_empty():
 		overlay = _candidate_material
 	for child in get_children():
 		if child is MeshInstance3D:
 			(child as MeshInstance3D).material_overlay = overlay
+
+# Enter/exit external two-hand control: freeze so physics can't fight the driver,
+# turn the outline blue, and restore freeze state on exit.
+func set_two_hand(on: bool) -> void:
+	two_hand = on
+	if on:
+		_saved_two_hand_freeze = freeze
+		freeze_mode = FREEZE_MODE_STATIC
+		freeze = true
+	else:
+		freeze = true if freeze_on_release else false
+	_update_highlight()
 
 
 # Write the captured render-frame trace as frame-to-frame deltas to user://grab_trace.txt

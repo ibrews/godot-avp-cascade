@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.5.0-engine"
+const APP_VERSION := "v0.5.1-grabscale"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
