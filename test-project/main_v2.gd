@@ -79,6 +79,16 @@ var _scale_start_dist := 0.0
 var _scale_start_scale := Vector3.ONE
 var _scale_pivot := Vector3.ZERO  # held object's position frozen at engage
 
+# Per-hand index-pinch hysteresis (true once pinched, stays true until clearly
+# released — kills the grab/release flicker that made grabbing stutter).
+var _index_pinch_state := {"left_hand": false, "right_hand": false}
+const PINCH_START := 0.032   # must close to here to BEGIN an index pinch
+const PINCH_END := 0.060     # must open past here to END it (hysteresis gap)
+
+# Simulation pause while the world handle is held, so physics doesn't fight the
+# world transform. Cubes freeze in place; pickup handlers are disabled.
+var _sim_paused := false
+
 # Scene handle: grab the chrome handlebar to move/scale the whole course.
 # Manual grab (the handle is a plain Node3D, NOT a pickup body) so the
 # PickupHandler can never auto-grab it by proximity near the face.
@@ -769,6 +779,40 @@ func _which_finger_pinch(side: String) -> int:
 		return -1
 	return best
 
+# True INDEX pinch with hysteresis + "index is the closest finger to the thumb".
+# Returns the index-thumb midpoint while pinching, else null. The closest-finger
+# test means a MIDDLE pinch (where the index also curls near the thumb) does NOT
+# count as an index pinch — fixing handle-grab firing on middle pinch. Hysteresis
+# (PINCH_START to begin, PINCH_END to release) kills the grab/release flicker.
+func _index_pinch_point(side: String):
+	if not _hand_confident(side):
+		_index_pinch_state[side] = false
+		return null
+	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
+	var ht := XRServer.get_tracker(tname) as XRHandTracker
+	if ht == null or not ht.get_has_tracking_data():
+		_index_pinch_state[side] = false
+		return null
+	var thumb := ht.get_hand_joint_transform(5).origin
+	var index := ht.get_hand_joint_transform(10).origin
+	var d_index := index.distance_to(thumb)
+	var was: bool = _index_pinch_state[side]
+	var active: bool
+	if was:
+		# Stay pinched until the gap clearly opens.
+		active = d_index < PINCH_END
+	else:
+		# To BEGIN, index must be closest finger to thumb AND within start dist.
+		var d_mid := ht.get_hand_joint_transform(15).origin.distance_to(thumb)
+		var d_ring := ht.get_hand_joint_transform(20).origin.distance_to(thumb)
+		var d_pinky := ht.get_hand_joint_transform(25).origin.distance_to(thumb)
+		var index_closest := d_index <= d_mid and d_index <= d_ring and d_index <= d_pinky
+		active = index_closest and d_index < PINCH_START
+	_index_pinch_state[side] = active
+	if not active:
+		return null
+	return (index + thumb) * 0.5
+
 # Toggle a giant inward-facing skybox sphere that fully blocks the real world.
 # We stay in mixed immersion (CompositorServices style is launch-bound); the
 # skybox is just opaque geometry surrounding the user. background_mode stays
@@ -794,9 +838,7 @@ func _update_scene_handle() -> void:
 	# body) so it can only be held by an INDEX pinch that STARTS near the bar. ---
 	if _handle_held_side == "":
 		for side in ["left_hand", "right_hand"]:
-			if not _hand_confident(side):
-				continue
-			var pp: Variant = _pinch_point(side)
+			var pp: Variant = _index_pinch_point(side)
 			if pp == null:
 				continue
 			# Don't steal a hand that is busy holding a course object.
@@ -808,15 +850,13 @@ func _update_scene_handle() -> void:
 				_handle_prev_pinch = pp
 				_world_scale_start_dist = 0.0
 				_scene_handle.set_held(true)
+				_pause_sim()  # freeze physics so it doesn't fight the world move
 				_append_log("handle grabbed by %s" % side)
 				break
 		return
 
-	# --- Held: confirm the holder still pinches confidently, else release. ---
-	if not _hand_confident(_handle_held_side):
-		_release_handle()
-		return
-	var hold_pinch: Variant = _pinch_point(_handle_held_side)
+	# --- Held: confirm the holder still index-pinches, else release. ---
+	var hold_pinch: Variant = _index_pinch_point(_handle_held_side)
 	if hold_pinch == null:
 		_release_handle()
 		return
@@ -824,8 +864,8 @@ func _update_scene_handle() -> void:
 	# --- Optional scale: other hand index-pinches → scale world about handle. ---
 	var other_side := "right_hand" if _handle_held_side == "left_hand" else "left_hand"
 	var scaling := false
-	if _hand_confident(other_side):
-		var other_pinch: Variant = _pinch_point(other_side)
+	if true:
+		var other_pinch: Variant = _index_pinch_point(other_side)
 		if other_pinch != null:
 			var pinch_vec: Vector3 = other_pinch
 			if _world_scale_start_dist <= 0.0:
@@ -860,6 +900,34 @@ func _release_handle() -> void:
 	_world_scale_start_dist = 0.0
 	if _scene_handle != null:
 		_scene_handle.set_held(false)
+	_resume_sim()
+
+# Freeze the simulation while the world handle is held: stop spawning, freeze
+# every active cube in place (saving its velocity), and disable both pickup
+# handlers so a stray pinch can't grab a course object mid-move.
+func _pause_sim() -> void:
+	if _sim_paused:
+		return
+	_sim_paused = true
+	for c in _active_cubes:
+		if is_instance_valid(c):
+			c.set_meta("saved_lin", c.linear_velocity)
+			c.set_meta("saved_ang", c.angular_velocity)
+			c.freeze = true
+	for side in _hand_handlers:
+		_hand_handlers[side].process_mode = Node.PROCESS_MODE_DISABLED
+
+func _resume_sim() -> void:
+	if not _sim_paused:
+		return
+	_sim_paused = false
+	for c in _active_cubes:
+		if is_instance_valid(c):
+			c.freeze = false
+			c.linear_velocity = c.get_meta("saved_lin", Vector3.ZERO)
+			c.angular_velocity = c.get_meta("saved_ang", Vector3.ZERO)
+	for side in _hand_handlers:
+		_hand_handlers[side].process_mode = Node.PROCESS_MODE_INHERIT
 
 # Uniformly scale WorldRoot to `target` while keeping `pivot` fixed in space.
 func _scale_world_about(pivot: Vector3, target: float) -> void:
@@ -902,7 +970,7 @@ func _update_two_hand_scale() -> void:
 
 	var other_side := "right_hand" if holder_side == "left_hand" else "left_hand"
 	# Only an INDEX→thumb pinch on the free hand drives scaling.
-	var other_pinch_pos: Variant = _pinch_point(other_side)
+	var other_pinch_pos: Variant = _index_pinch_point(other_side)
 	if other_pinch_pos == null:
 		_end_scale()
 		return
