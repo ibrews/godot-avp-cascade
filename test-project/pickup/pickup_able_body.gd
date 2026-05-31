@@ -26,6 +26,8 @@ static func _make_outline(color: Color, width: float) -> ShaderMaterial:
 
 var original_parent : Node3D
 var tween : Tween
+# Resting freeze mode, restored on release. While held we force STATIC (see pick_up).
+var _saved_freeze_mode : int = FREEZE_MODE_STATIC
 
 # Position history for throw velocity: Array of {pos: Vector3, t: int}
 var _pos_history : Array = []
@@ -81,6 +83,13 @@ func pick_up(pick_up_by) -> void:
 	picked_up_by = pick_up_by
 	picked_up_by.add_child(self)
 	global_transform = current_transform
+	# Held bodies MUST use STATIC freeze: the handler rewrites global_transform every
+	# physics frame, and STATIC freeze applies that as a clean teleport. KINEMATIC
+	# freeze (used by the course obstacles at rest) instead sweeps the move through
+	# the solver one frame behind, fighting the handler = grab stutter. Cubes already
+	# default to STATIC, which is why they grab smoothly.
+	_saved_freeze_mode = freeze_mode
+	freeze_mode = FREEZE_MODE_STATIC
 	freeze = true
 	_pos_history.clear()
 	_update_highlight()
@@ -122,6 +131,9 @@ func let_go() -> void:
 
 	original_parent.add_child(self)
 	global_transform = current_transform
+
+	# Restore the resting freeze mode (e.g. KINEMATIC for course obstacles).
+	freeze_mode = _saved_freeze_mode
 
 	if freeze_on_release:
 		# Stay where dropped (plates/wall) — remain a frozen collider, no throw.
