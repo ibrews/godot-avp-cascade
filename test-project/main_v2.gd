@@ -647,7 +647,7 @@ func _reset_sandbox():
 	# Restore the world transform (handle may have moved/scaled it).
 	if is_instance_valid(_world_root):
 		_world_root.transform = _world_home
-	_handle_prev_pos = null
+	_handle_prev_pinch = null
 	_world_scale_start_dist = 0.0
 	# Despawn all cubes.
 	for c in _active_cubes:
