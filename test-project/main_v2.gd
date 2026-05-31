@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.2.6-handfix"
+const APP_VERSION := "v0.2.8-spinboom"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -184,9 +184,11 @@ func _build_plate(y: float, z: float, x_rot_deg: float) -> void:
 		Basis().rotated(Vector3.RIGHT, deg_to_rad(x_rot_deg)),
 		Vector3(0.0, y, z)
 	)
+	# Smaller starting plates — 1.6×1.2 m read as huge/unwieldy on device.
+	var plate_size := Vector3(0.95, 0.04, 0.72)
 	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
-	bm.size = Vector3(1.6, 0.04, 1.2)
+	bm.size = plate_size
 	mi.mesh = bm
 	var plate_mat := StandardMaterial3D.new()
 	plate_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
@@ -195,7 +197,7 @@ func _build_plate(y: float, z: float, x_rot_deg: float) -> void:
 	plate.add_child(mi)
 	var cs := CollisionShape3D.new()
 	var bs := BoxShape3D.new()
-	bs.size = Vector3(1.6, 0.04, 1.2)
+	bs.size = plate_size
 	cs.shape = bs
 	plate.add_child(cs)
 	_world_root.add_child(plate)
@@ -369,7 +371,7 @@ func _setup_audio():
 	_shared_audio = AudioStreamPlayer3D.new()
 	var gen := AudioStreamGenerator.new()
 	gen.mix_rate = SAMPLE_RATE
-	gen.buffer_length = 0.3
+	gen.buffer_length = 0.6  # room for the one-shot score fanfare (boom is ~0.55s)
 	_shared_audio.stream = gen
 	_shared_audio.volume_db = -3.0
 	_shared_audio.max_distance = 5.0
@@ -755,44 +757,107 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 	# stands apart from the flat multiplier popups. Small +N / xN stay flat.
 	BigScorePopup3D.spawn(self, at + Vector3(0, 0.05, 0), str(total), Color(0.55, 0.95, 1.0))
 	_spawn_burst(at, Color(0.40, 0.90, 1.0))
-	_push_score_arpeggio()
+	_push_score_fanfare()
 
-# Celebratory one-shot particle burst at the portal.
+# Celebratory fireworks at the portal: a big multicolor burst, a layer of fast
+# bright sparks, and an expanding shockwave ring flash.
 func _spawn_burst(pos: Vector3, color: Color):
+	# Layer 1 — main colorful burst (color ramp through warm tones into the accent).
+	var ramp := _make_gradient([
+		Color(1.0, 1.0, 0.95, 1.0),   # hot white core
+		Color(1.0, 0.80, 0.20, 1.0),  # gold
+		Color(1.0, 0.40, 0.10, 1.0),  # orange
+		Color(color.r, color.g, color.b, 0.9),
+		Color(color.r, color.g, color.b, 0.0),  # fade out
+	])
+	_emit_burst_layer(pos, 110, 0.032, 1.1, 0.8, 2.6, -1.3, 0.4, 1.3, ramp, color)
+	# Layer 2 — fast, tiny, very bright sparks that streak out and die quickly.
+	_emit_burst_layer(pos, 60, 0.014, 0.55, 2.2, 4.4, -1.8, 0.3, 0.8, null, Color(1.0, 0.97, 0.85))
+	# Layer 3 — expanding shockwave ring.
+	_spawn_shockwave(pos, color)
+
+# One GPUParticles3D one-shot burst layer.
+func _emit_burst_layer(pos: Vector3, amount: int, quad_size: float, lifetime: float,
+		vmin: float, vmax: float, gravity_y: float, smin: float, smax: float,
+		ramp: GradientTexture1D, base_color: Color) -> void:
 	var pmat := StandardMaterial3D.new()
 	pmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	pmat.albedo_color = Color(color.r, color.g, color.b, 0.9)
+	pmat.albedo_color = Color(base_color.r, base_color.g, base_color.b, 0.95)
 	pmat.emission_enabled = true
-	pmat.emission = color
-	pmat.emission_energy_multiplier = 3.0
+	pmat.emission = base_color
+	pmat.emission_energy_multiplier = 4.0
 	pmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	pmat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.03, 0.03)
+	quad.size = Vector2(quad_size, quad_size)
 	quad.material = pmat
 	var proc := ParticleProcessMaterial.new()
 	proc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
 	proc.emission_sphere_radius = 0.02
 	proc.direction = Vector3(0, 1, 0)
 	proc.spread = 180.0
-	proc.initial_velocity_min = 0.6
-	proc.initial_velocity_max = 1.6
-	proc.gravity = Vector3(0, -0.8, 0)
-	proc.scale_min = 0.4
-	proc.scale_max = 1.1
+	proc.initial_velocity_min = vmin
+	proc.initial_velocity_max = vmax
+	proc.gravity = Vector3(0, gravity_y, 0)
+	proc.scale_min = smin
+	proc.scale_max = smax
+	if ramp != null:
+		proc.color_ramp = ramp
 	var burst := GPUParticles3D.new()
-	burst.amount = 36
-	burst.lifetime = 0.7
+	burst.amount = amount
+	burst.lifetime = lifetime
 	burst.one_shot = true
 	burst.explosiveness = 1.0
 	burst.process_material = proc
 	burst.draw_pass_1 = quad
-	burst.visibility_aabb = AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2))
+	burst.visibility_aabb = AABB(Vector3(-1.5, -1.5, -1.5), Vector3(3, 3, 3))
 	burst.position = pos
 	add_child(burst)
 	burst.emitting = true
-	# Free after it finishes.
-	get_tree().create_timer(1.2).timeout.connect(func():
+	get_tree().create_timer(lifetime + 0.5).timeout.connect(func():
 		if is_instance_valid(burst): burst.queue_free())
+
+# Expanding, fading emissive ring that punches outward from the score point.
+func _spawn_shockwave(pos: Vector3, color: Color) -> void:
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.05
+	torus.outer_radius = 0.07
+	ring.mesh = torus
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.albedo_color = Color(color.r, color.g, color.b, 0.85)
+	m.emission_enabled = true
+	m.emission = color
+	m.emission_energy_multiplier = 3.5
+	ring.material_override = m
+	ring.position = pos
+	# Face the user so the ring reads as a flat expanding flash.
+	var cam := get_viewport().get_camera_3d()
+	if cam != null and not cam.global_position.is_equal_approx(pos):
+		ring.look_at(cam.global_position, Vector3.UP)
+	add_child(ring)
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(ring, "scale", Vector3.ONE * 9.0, 0.45).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(m, "albedo_color:a", 0.0, 0.45)
+	tw.tween_property(m, "emission_energy_multiplier", 0.0, 0.45)
+	tw.chain().tween_callback(ring.queue_free)
+
+# Build a GradientTexture1D from a list of colors (evenly spaced) for particle ramps.
+func _make_gradient(colors: Array) -> GradientTexture1D:
+	var g := Gradient.new()
+	var offsets := PackedFloat32Array()
+	var cols := PackedColorArray()
+	var n := colors.size()
+	for i in range(n):
+		offsets.append(float(i) / float(maxi(1, n - 1)))
+		cols.append(colors[i])
+	g.offsets = offsets
+	g.colors = cols
+	var tex := GradientTexture1D.new()
+	tex.gradient = g
+	return tex
 
 func _chain_color(chain: int) -> Color:
 	if chain >= 6:
@@ -861,21 +926,35 @@ func _push_sweep(f0: float, f1: float, dur: float):
 		var s := sin(phase) * env * 0.38
 		_audio_playback.push_frame(Vector2(s, s))
 
-# Rising 3-note arpeggio for a scored cube.
-func _push_score_arpeggio():
+# Powerful score sound to match the fireworks: a deep pitch-dropping boom + a
+# noise crack + a sparkle shimmer tail, with the rising C-E-G arpeggio layered on
+# top. Mixed into ONE buffer fill (needs buffer_length >= ~0.55s).
+func _push_score_fanfare():
 	if _audio_playback == null:
 		return
-	var freqs := [523.25, 659.25, 783.99]  # C5, E5, G5
+	var dur := 0.55
+	var n := int(SAMPLE_RATE * dur)
+	var to_fill: int = min(n, _audio_playback.get_frames_available())
+	var arp := [523.25, 659.25, 783.99]  # C5, E5, G5
 	var note_dur := 0.07
-	for f in freqs:
-		var n := int(SAMPLE_RATE * note_dur)
-		var avail := _audio_playback.get_frames_available()
-		var to_fill: int = min(n, avail)
-		for i in range(to_fill):
-			var t := float(i) / SAMPLE_RATE
-			var env := sin(PI * t / note_dur)
-			var s := (sin(TAU * f * t) * 0.45 + sin(TAU * f * 2.0 * t) * 0.12) * env
-			_audio_playback.push_frame(Vector2(s, s))
+	for i in range(to_fill):
+		var t := float(i) / SAMPLE_RATE
+		var u := t / dur
+		# Sub boom: pitch drops 95→40 Hz with a fast exponential decay.
+		var f: float = lerp(95.0, 40.0, sqrt(u))
+		var s := sin(TAU * f * t) * exp(-3.6 * u) * 0.85
+		# Explosion crack: white-noise burst, very fast decay.
+		s += (randf() * 2.0 - 1.0) * exp(-10.0 * u) * 0.33
+		# Sparkle shimmer that lingers a touch.
+		s += sin(TAU * 1300.0 * t) * exp(-4.5 * u) * 0.10 * (0.5 + 0.5 * sin(TAU * 9.0 * t))
+		# Rising arpeggio layered over the first three note slots.
+		var ni := int(t / note_dur)
+		if ni < arp.size():
+			var nt := t - float(ni) * note_dur
+			var nenv := sin(PI * nt / note_dur)
+			s += (sin(TAU * arp[ni] * t) * 0.30 + sin(TAU * arp[ni] * 2.0 * t) * 0.08) * nenv
+		s = clampf(s, -1.0, 1.0)
+		_audio_playback.push_frame(Vector2(s, s))
 
 # Returns which finger tip (15=middle, 20=ring, 25=pinky) is pinching the thumb,
 # or -1 if none. "Closest wins": only the single finger nearest the thumb counts,
