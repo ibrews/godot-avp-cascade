@@ -425,7 +425,10 @@ func _process(delta: float):
 				_gesture_cooldown = 0.8
 				break
 
-	_update_scene_handle()
+	# _update_scene_handle()  # DISABLED — telemetry showed it grabs spuriously every
+	# few frames during cube grabs; each grab calls _pause_sim() which toggles the
+	# PickupHandlers' process_mode DISABLED<->INHERIT, freezing/un-freezing the held
+	# cube = "fighting between two positions". Restoring yesterday's smooth path.
 	# _update_two_hand_scale()  # DISABLED for A/B test — suspected to fight PickupHandler on held objects
 
 	if _spawn_timer >= SPAWN_INTERVAL:
