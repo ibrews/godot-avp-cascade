@@ -4,7 +4,51 @@ Turning the falling-cascade demo into a proper physics-sandbox sample project fo
 
 ## ⚠️ STATE (2026-05-31, session 2) — READ FIRST
 
-Device app **v0.1.3-fixA** installed. AWAITING headset re-capture of grab_trace.txt.
+Device app **v0.1.8-smooth** (seq 3140). AWAITING headset feel-test.
+- **v0.1.7 grab-orientation fix CONFIRMED** (rotation jump gone). grab_snap.txt=148.6° =
+  the reorientation the old IDENTITY snap applied; now preserved.
+- **BUT held follow felt "electric" (raw jitter, pos+rot).** v0.1.7 trace: ±1–3mm & ±2°
+  per frame with sign flips every frame = raw XRHandTracker noise passed 1:1.
+- **KEY LESSON: I was wrong to revert the v0.1.5 one-euro filter.** Its still-hold trace
+  was smooth (sub-mm glide) — I mislabeled that smoothness as "lag" and reverted. User
+  explicitly WANTS the dampened/interpolated feel. (Also: v0.1.5 beta=0.06 was far too
+  low → genuinely laggy on fast moves; standard one-euro beta ~0.5–1.0.)
+- **v0.1.8 = one-euro on BOTH pos + rot, KEPT.** Persistent WORLD-space filtered
+  transform in pickup_able_body._process (render rate), eased toward holder's raw pose.
+  Tunables: FOLLOW_POS_MIN_CUTOFF=2.0/BETA=0.7, FOLLOW_ROT_MIN_CUTOFF=3.0/BETA=0.35.
+  Replaced the reparent 1:1 ride AND the snap tween (filter eases the grab in).
+  If still jittery → lower MIN_CUTOFFs. If laggy on fast moves → raise BETAs.
+- Last main commit 75d7804 (v0.1.4). v0.1.5(reverted)/6/7/8 uncommitted — commit v0.1.7
+  grab-orient + v0.1.8 smoothing together once feel is confirmed, then KB write, then Task 2.
+
+### (prior) v0.1.7-graborient
+- **v0.1.5 one-euro filter REVERTED** (not committed). Still-hold grab_trace.txt proved the
+  held position is already clean after Fix A (<0.3mm/frame, no jitter/beat with hand
+  confirmed still) — the filter only added rubber-band lag vs natural hand sway.
+- **Release snap diagnosed (v0.1.6 release probe): NOT a release bug.** release_trace.txt
+  showed orientation 0.000 across all 12 post-release frames (bit-identical, no
+  discontinuity, no settling). The reorientation the user feels "on release" is actually
+  the GRAB-time snap: pickup tweened local transform to Transform3D.IDENTITY, forcing the
+  cube's orientation to align to the hand axis.
+- **v0.1.7 fix:** pickup now tweens to Transform3D(grab_local.basis, Vector3.ZERO) —
+  position still snaps to fingertips, but orientation is PRESERVED ("grab it as-is").
+  Added grab_snap.txt probe = resting→hand angle (the now-avoided snap magnitude).
+- **If confirmed:** commit Fix A is already in (acb5aa8); commit v0.1.7 grab-orient; then
+  Task 2 (two-hand scale). Last commit on main = 75d7804 (v0.1.4). v0.1.5/6/7 uncommitted.
+
+### (prior) Device app v0.1.3-fixA / v0.1.5-oneeuro
+- **Fix A (v0.1.3, committed acb5aa8) WORKED** for the 60 Hz beat: steady-hold floor
+  7.2mm→1.1mm, saw-tooth gone. **HELD_ROT_DAMP removed (v0.1.4, committed 75d7804).**
+- **BUT user reports residual stutter persists.** Root cause refined: after Fix A the
+  held body inherits the handler anchor 1:1 every render frame, and the anchor =
+  RAW XRHandTracker fingertip midpoint with nothing smoothing it → sensor jitter
+  lands straight on the cube. (v0.1.4 trace mean=3.96 but contaminated by real motion.)
+- **Fix C = ONE-EURO FILTER on the anchor (v0.1.5, NOT yet committed — awaiting verify).**
+  Added `_filter_anchor()` + `_oe_alpha()` to pickup_handler.gd; runs in `_process`
+  (render rate = KB-safe domain). Adaptive low-pass: smooths jitter at rest, raises
+  cutoff with hand speed so fast moves get ~no lag. Tunables: ANCHOR_MIN_CUTOFF=1.6,
+  ANCHOR_BETA=0.06, ANCHOR_DCUTOFF=1.0. If still jittery at rest → lower MIN_CUTOFF.
+  If laggy on fast moves → raise BETA. NEVER move this to _physics_process (60 Hz).
 - **Build 1 trace (actual, seq ~3096):** dt clean ~11 ms = 90 Hz render confirmed, no
   drops. deuler tiny after the grab-snap frame (<1°/frame) → rotation confirmed NOT the
   cause; HELD_ROT_DAMP is a no-op (remove it). |dpos| mean=7.205 max=18.553 mm — BUT this

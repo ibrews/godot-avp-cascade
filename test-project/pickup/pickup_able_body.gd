@@ -33,7 +33,6 @@ var _saved_freeze_mode : int = FREEZE_MODE_STATIC
 var _pos_history : Array = []
 const _POS_HISTORY_MAX := 6
 
-const PICKUP_SNAP_DURATION := 0.03
 
 # --- Per-render-frame grab trace (diagnostic for the POSITIONAL stutter) ---
 # While held, capture (t_usec, global_position, basis euler) every RENDER frame into
@@ -46,6 +45,37 @@ const PICKUP_SNAP_DURATION := 0.03
 const TRACE_FRAMES := 90
 var _trace : Array = []
 var _trace_done := false
+
+# --- Release-transition probe (diagnostic for "snaps to a different orientation on let go") ---
+# On release we record the held orientation (last frame before physics took over) then the
+# global orientation for the next REL_FRAMES physics frames, and dump euler deltas to
+# user://release_trace.txt. If frame 0→1 already shows a big jump = transform discontinuity
+# at release; if it grows over several frames = physics settling (gravity/contact torque).
+const REL_FRAMES := 12
+var _rel_log : Array = []
+var _rel_active := false
+
+# --- Held-follow smoothing (one-euro: position + adaptive-slerp rotation) ---
+# The held body used to ride the handler 1:1, which passed raw XRHandTracker sensor
+# noise straight through ("electric" jitter on pos AND rotation). We instead keep a
+# PERSISTENT world-space filtered transform and, each render frame, ease it toward the
+# handler's raw world pose. That persistent state is the stable frame the smoothing
+# needs — we never read it back from the reparented body (doing so would re-absorb the
+# jitter, which is the trap the KB warns about). One-euro = smooth at rest, opens its
+# cutoff with speed so fast moves keep ~zero lag. Render-rate (_process), never physics.
+# Tune on-device: *_MIN_CUTOFF ↓ = smoother/laggier at rest ; *_BETA ↑ = snappier when moving.
+const FOLLOW_POS_MIN_CUTOFF := 2.0   # Hz
+const FOLLOW_POS_BETA := 0.7         # per (m/s)
+const FOLLOW_ROT_MIN_CUTOFF := 3.0   # Hz
+const FOLLOW_ROT_BETA := 0.35        # per (rad/s)
+const FOLLOW_DCUTOFF := 1.0          # Hz, cutoff for the speed estimates themselves
+var _follow_ready := false
+var _filt_pos : Vector3 = Vector3.ZERO
+var _filt_basis : Basis = Basis.IDENTITY
+var _filt_vel : Vector3 = Vector3.ZERO      # filtered linear speed (m/s)
+var _filt_avel : float = 0.0                # filtered angular speed (rad/s)
+var _grab_rot_offset : Basis = Basis.IDENTITY   # held body's basis relative to the holder, at grab
+var _grab_scale : Vector3 = Vector3.ONE
 
 
 # Called when this object becomes the closest body in an area
@@ -69,30 +99,69 @@ func is_picked_up() -> bool:
 
 # Track global position while held (for throw velocity) — physics rate is fine here.
 func _physics_process(_delta: float) -> void:
+	# Release-transition probe: after let_go() arms this, log the post-release world
+	# orientation for a few physics frames, then dump once. Runs whether or not held.
+	if _rel_active:
+		_rel_log.append([Time.get_ticks_usec(), global_transform.basis.get_euler()])
+		if _rel_log.size() >= REL_FRAMES + 1:
+			_dump_release_trace()
+			_rel_active = false
+
 	if not is_picked_up():
 		return
 	_pos_history.append({"pos": global_position, "t": Time.get_ticks_msec()})
 	if _pos_history.size() > _POS_HISTORY_MAX:
 		_pos_history.pop_front()
 
-# Render-frame hook while held. The body follows the handler purely via reparenting
-# (local transform snapped to IDENTITY at pickup → rides the handler's 90 Hz pose 1:1,
-# rotation included). We do NOT rewrite the transform here: the old HELD_ROT_DAMP
-# low-pass was removed once grab_trace.txt proved rotation was never the stutter
-# (deuler <1°/frame) — it only added rotation lag. This hook now just captures the
-# one-shot diagnostic trace.
-func _process(_delta: float) -> void:
+# Render-frame hook while held. Drives the body's world transform via a one-euro filter
+# easing toward the handler's raw pose (smooths the hand-tracking jitter on pos + rot).
+# Render rate, so it tracks the 90 Hz display. Replaces both the old 1:1 reparent ride
+# (too raw — "electric") and the pickup snap tween (the filter eases in the grab itself).
+func _process(delta: float) -> void:
 	if not is_picked_up():
 		return
-	# Don't capture during the brief pickup snap tween (it animates transform → IDENTITY).
-	if tween != null and tween.is_running():
+	var holder := picked_up_by as Node3D
+	if holder == null:
 		return
+
+	var holder_xform := holder.global_transform
+	var target_pos := holder_xform.origin
+	var target_basis := (holder_xform.basis.orthonormalized() * _grab_rot_offset).orthonormalized()
+
+	if not _follow_ready or delta <= 0.0:
+		# Seed from the body's current visual pose so the grab eases in from where it is.
+		_filt_pos = global_position
+		_filt_basis = global_transform.basis.orthonormalized()
+		_filt_vel = Vector3.ZERO
+		_filt_avel = 0.0
+		_follow_ready = true
+	else:
+		var a_d := _oe_alpha(FOLLOW_DCUTOFF, delta)
+		# Position one-euro.
+		var d_pos := (target_pos - _filt_pos) / delta
+		_filt_vel = _filt_vel.lerp(d_pos, a_d)
+		var p_cut := FOLLOW_POS_MIN_CUTOFF + FOLLOW_POS_BETA * _filt_vel.length()
+		_filt_pos = _filt_pos.lerp(target_pos, _oe_alpha(p_cut, delta))
+		# Rotation one-euro (adaptive slerp).
+		var ang := _filt_basis.get_rotation_quaternion().angle_to(target_basis.get_rotation_quaternion())
+		_filt_avel = lerpf(_filt_avel, ang / delta, a_d)
+		var r_cut := FOLLOW_ROT_MIN_CUTOFF + FOLLOW_ROT_BETA * _filt_avel
+		_filt_basis = _filt_basis.slerp(target_basis, _oe_alpha(r_cut, delta)).orthonormalized()
+
+	global_transform = Transform3D(_filt_basis.scaled(_grab_scale), _filt_pos)
+
 	# Per-render-frame grab trace (one-shot per grab, ~90 frames ≈ 1 s at 90 Hz).
 	if not _trace_done:
 		_trace.append([Time.get_ticks_usec(), global_position, global_transform.basis.get_euler()])
 		if _trace.size() >= TRACE_FRAMES:
 			_dump_trace()
 			_trace_done = true
+
+
+# Smoothing factor for a first-order low-pass at the given cutoff (Hz) and dt (s).
+func _oe_alpha(cutoff: float, dt: float) -> float:
+	var tau := 1.0 / (TAU * cutoff)
+	return 1.0 / (1.0 + tau / dt)
 
 
 # Pick this object up.
@@ -127,11 +196,28 @@ func pick_up(pick_up_by) -> void:
 	_trace_done = false
 	_update_highlight()
 
-	# Kill any existing tween and snap to the pinch midpoint (local origin of handler).
+	# Capture the body's orientation RELATIVE to the holder at grab, and its scale, so the
+	# follow filter preserves "grab it as-is" (no re-align to the hand axis — the old
+	# IDENTITY snap rotated through ~149°, see grab_snap.txt) while still letting the cube
+	# rotate WITH the hand. The one-euro follow in _process eases position to the fingertips
+	# and tracks rotation; no snap tween needed (it would fight the filter).
+	var holder := pick_up_by as Node3D
+	if holder != null:
+		_grab_rot_offset = holder.global_transform.basis.orthonormalized().inverse() * current_transform.basis.orthonormalized()
+	else:
+		_grab_rot_offset = Basis.IDENTITY
+	_grab_scale = current_transform.basis.get_scale()
+	_follow_ready = false   # seed the filter from the current pose on the first frame
+
+	# Grab-snap probe: the resting→hand angle the old IDENTITY snap would have applied.
+	if holder != null:
+		var rest_q: Quaternion = current_transform.basis.orthonormalized().get_rotation_quaternion()
+		var hand_q: Quaternion = holder.global_transform.basis.orthonormalized().get_rotation_quaternion()
+		_dump_grab_snap(rad_to_deg(rest_q.angle_to(hand_q)))
+
 	if tween:
 		tween.kill()
-	tween = create_tween()
-	tween.tween_property(self, "transform", Transform3D.IDENTITY, PICKUP_SNAP_DURATION)
+		tween = null
 
 
 # Let this object go — applies throw velocity from position history.
@@ -164,6 +250,11 @@ func let_go() -> void:
 
 	original_parent.add_child(self)
 	global_transform = current_transform
+
+	# Arm the release-transition probe: seed with the held orientation (= current_transform,
+	# the last visual pose), then _physics_process logs the next REL_FRAMES frames.
+	_rel_log = [[Time.get_ticks_usec(), current_transform.basis.get_euler()]]
+	_rel_active = true
 
 	# Restore the resting freeze mode (e.g. KINEMATIC for course obstacles).
 	freeze_mode = _saved_freeze_mode
@@ -218,4 +309,36 @@ func _dump_trace() -> void:
 			rad_to_deg(deu.x), rad_to_deg(deu.y), rad_to_deg(deu.z)])
 	var n := maxi(1, _trace.size() - 1)
 	f.store_string("# |dpos|_mm  mean=%.3f  max=%.3f  (a flat mean≈max means smooth; spikes = re-pin beat)\n" % [sum_mag / float(n), max_mag])
+	f.close()
+
+
+# Dump the release-transition probe: euler deltas from the held pose (frame 0) through
+# the first few post-release physics frames. Big 0→1 = discontinuity at release; growth
+# over frames = physics settling. Lands in user:// (Documents on visionOS).
+func _dump_release_trace() -> void:
+	var f := FileAccess.open("user://release_trace.txt", FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string("# release trace: frame 0 = held pose, then post-release physics frames. body=%s\n" % name)
+	f.store_string("# dt_ms | deuler_deg x,y,z (vs previous) | cumulative_deg from held pose\n")
+	var base_eu: Vector3 = _rel_log[0][1]
+	for i in range(1, _rel_log.size()):
+		var prev: Array = _rel_log[i - 1]
+		var cur: Array = _rel_log[i]
+		var dt_ms := (float(cur[0]) - float(prev[0])) / 1000.0
+		var deu: Vector3 = cur[1] - prev[1]
+		var cum: Vector3 = cur[1] - base_eu
+		f.store_string("%6.2f | %7.3f %7.3f %7.3f | %7.3f %7.3f %7.3f\n" % [
+			dt_ms, rad_to_deg(deu.x), rad_to_deg(deu.y), rad_to_deg(deu.z),
+			rad_to_deg(cum.x), rad_to_deg(cum.y), rad_to_deg(cum.z)])
+	f.close()
+
+
+# Grab-snap probe: write the resting→hand orientation angle (deg) at the last grab.
+# After the orientation-preserving fix this is the angle the cube NO LONGER snaps through.
+func _dump_grab_snap(angle_deg: float) -> void:
+	var f := FileAccess.open("user://grab_snap.txt", FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string("last grab: resting→hand orientation = %.1f deg (this is the reorientation the old IDENTITY snap applied; now preserved)\n" % angle_deg)
 	f.close()

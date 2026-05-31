@@ -151,6 +151,10 @@ func _update_anchor_from_hand_tracker() -> void:
 	else:
 		target_position = hand_tracker.get_hand_joint_transform(thumb_joint).origin
 
+	# Raw fingertip anchor at render rate. The still-hold grab_trace.txt proved this is
+	# already clean (<0.3 mm/frame jitter); a one-euro filter here only added rubber-band
+	# lag against natural hand sway, so it was reverted. Fix A (this running in _process,
+	# not _physics_process) is what removed the 60/90 Hz beat — that's the real fix.
 	var anchor_transform := global_transform
 	anchor_transform.origin = target_position
 	global_transform = anchor_transform
