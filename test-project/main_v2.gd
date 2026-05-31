@@ -9,7 +9,7 @@ extends Node3D
 
 # Shown on the in-world info panel. Bump on meaningful releases.
 const APP_TITLE := "A Godot Sample by @ibrews"
-const APP_VERSION := "v0.1.8-smooth"
+const APP_VERSION := "v0.2.2-aaoff"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -129,6 +129,14 @@ func _ready():
 		var viewport = get_viewport()
 		viewport.use_xr = true
 		viewport.vrs_mode = Viewport.VRS_XR
+		# DO NOT touch the XR render buffer here. Both viewport.msaa_3d (MSAA) AND
+		# viewport.scaling_3d_scale (SSAA/supersample) CRASH AT BOOT on the .layered
+		# foveated CompositorServices target — any multisampled OR resized render
+		# buffer breaks the compositor handoff. Verified on device: v0.1.9-msaa and
+		# v0.2.1-ssaa both failed to launch; v0.2.0-aa-off (neither) boots fine.
+		# Mixed-mode alpha-edge blockiness (no fractional alpha at silhouettes) is
+		# therefore an ENGINE-LEVEL fix only — bundle with the fork recompile.
+		# See KB intelligence/techniques/godot-avp-alpha-edge-aa.md.
 	else:
 		print("[Sandbox] visionOS XR init FAILED")
 	_write_log("Sandbox boot — XR=%s" % ("OK" if _xr_ok else "FAILED"))
