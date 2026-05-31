@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.2.8-spinboom"
+const APP_VERSION := "v0.3.0-leaderboard"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -128,6 +128,25 @@ var _info_accent: MeshInstance3D
 var _info_accent_mat: StandardMaterial3D
 var _info_panel_t := 0.0
 
+# --- 30-second time-attack mode + global leaderboard ---
+# Poke the START button to begin a 30 s round; rack up the most points. On end,
+# the round score posts to the leaderboard (Apps Script GET-submit) and updates
+# the local best. Paste your deployed /exec URL into LEADERBOARD_URL to go live;
+# empty = local-best only (no network).
+const ROUND_SECONDS := 30.0
+const LEADERBOARD_URL := "https://script.google.com/macros/s/AKfycbzfnTbrGnRE0ANAVujqDWRyYi_eub7HOvS-m3uI3WY-ysMw0LohX3d48iyE7D86jn5R/exec"
+const LEADERBOARD_KEY := "cascade-2026"   # must match Code.gs APP_KEY
+const PLAYER_INITIALS := "AGL"            # 3-letter tag posted with the score
+var _timer_active := false
+var _timer_remaining := 0.0
+var _round_score := 0
+var _best_score := 0
+var _start_button: Node3D
+var _start_button_label: Label3D
+var _start_button_mat: StandardMaterial3D
+var _start_cooldown := 0.0
+var _http: HTTPRequest
+
 func _ready():
 	var interface = XRServer.find_interface("visionOS")
 	if interface and interface.initialize():
@@ -153,6 +172,10 @@ func _ready():
 	_build_info_panel()
 	_setup_audio()
 	_setup_hands()
+	_http = HTTPRequest.new()
+	add_child(_http)
+	_load_best()
+	_build_start_button()
 	_write_log("Sandbox built; audio ready; hand tracking active")
 
 func _build_resources():
@@ -566,6 +589,7 @@ func _process(delta: float):
 				break
 
 	_update_info_panel(delta)
+	_update_timer(delta)
 	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
 	# the origin about the pinch midpoint) is the next step; per-object scale stays off.
@@ -745,6 +769,10 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 	var surface_pts: int = cube.get_meta("score_acc", 0)
 	var total := int(round(alive_s * TIME_POINTS_PER_SEC)) + surface_pts
 	total = max(total, 1)
+
+	# Time-attack: tally toward the active round.
+	if _timer_active:
+		_round_score += total
 
 	# Despawn the cube.
 	_active_cubes.erase(cube)
@@ -1059,6 +1087,127 @@ func _toggle_immersion() -> void:
 		_push_sweep(220.0, 660.0, 0.35)
 	else:
 		_push_sweep(660.0, 220.0, 0.30)
+
+# --- Time-attack mode -------------------------------------------------------
+
+# Build the pokable START button (reachable, near the world handle).
+func _build_start_button() -> void:
+	_start_button = Node3D.new()
+	_start_button.name = "StartButton"
+	_start_button.position = Vector3(0.42, 1.20, -0.45)
+	add_child(_start_button)
+
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.17, 0.085, 0.03)
+	mi.mesh = bm
+	_start_button_mat = StandardMaterial3D.new()
+	_start_button_mat.albedo_color = Color(0.10, 0.42, 0.24)
+	_start_button_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	_start_button_mat.emission_enabled = true
+	_start_button_mat.emission = Color(0.20, 0.95, 0.45)
+	_start_button_mat.emission_energy_multiplier = 1.2
+	mi.material_override = _start_button_mat
+	_start_button.add_child(mi)
+
+	_start_button_label = Label3D.new()
+	_start_button_label.font_size = 34
+	_start_button_label.outline_size = 8
+	_start_button_label.modulate = Color.WHITE
+	_start_button_label.outline_modulate = Color(0, 0, 0, 0.9)
+	_start_button_label.pixel_size = 0.0005
+	_start_button_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_start_button_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_start_button_label.position = Vector3(0, 0, 0.02)
+	_start_button.add_child(_start_button_label)
+	_refresh_button_label()
+
+# Tick the round, or watch for a finger poke to start one.
+func _update_timer(delta: float) -> void:
+	_start_cooldown = max(0.0, _start_cooldown - delta)
+	if _timer_active:
+		_timer_remaining -= delta
+		# Pulse the button red as time runs low.
+		var urgency := 1.0 - clampf(_timer_remaining / ROUND_SECONDS, 0.0, 1.0)
+		_start_button_mat.emission = Color(0.2 + urgency * 0.8, 0.9 - urgency * 0.7, 0.45 - urgency * 0.3)
+		_refresh_button_label()
+		if _timer_remaining <= 0.0:
+			_end_round()
+		return
+	if _start_cooldown > 0.0 or _start_button == null:
+		return
+	for side in ["left_hand", "right_hand"]:
+		var tip = _index_tip_world(side)
+		if tip != null and (tip as Vector3).distance_to(_start_button.global_position) <= 0.08:
+			_start_round()
+			break
+
+# Index fingertip in WORLD space (tracking-space joint rendered through XROrigin,
+# same compensation as the hand mesh — so the poke matches where the finger looks).
+func _index_tip_world(side: String):
+	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
+	var ht := XRServer.get_tracker(tname) as XRHandTracker
+	if ht == null or not ht.get_has_tracking_data():
+		return null
+	var idx := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+	if not (int(ht.get_hand_joint_flags(idx)) & 8):  # POSITION_TRACKED
+		return null
+	var origin := $XROrigin3D as Node3D
+	return origin.global_transform * ht.get_hand_joint_transform(idx).origin
+
+func _start_round() -> void:
+	_timer_active = true
+	_timer_remaining = ROUND_SECONDS
+	_round_score = 0
+	_start_cooldown = 1.0
+	_push_sweep(300.0, 900.0, 0.25)  # start chirp
+	_refresh_button_label()
+
+func _end_round() -> void:
+	_timer_active = false
+	_timer_remaining = 0.0
+	var final_score := _round_score
+	if final_score > _best_score:
+		_best_score = final_score
+		_save_best()
+	_start_button_mat.emission = Color(0.20, 0.95, 0.45)
+	# Celebrate above the button: volumetric score + fireworks + fanfare.
+	var burst_at := _start_button.global_position + Vector3(0, 0.18, 0)
+	BigScorePopup3D.spawn(self, burst_at, str(final_score))
+	_spawn_burst(burst_at, Color(0.30, 1.0, 0.55))
+	_push_score_fanfare()
+	_submit_score(final_score)
+	_start_cooldown = 2.5
+	_refresh_button_label()
+
+func _refresh_button_label() -> void:
+	if _start_button_label == null:
+		return
+	if _timer_active:
+		_start_button_label.text = "%d\n%d pts" % [int(ceil(_timer_remaining)), _round_score]
+	else:
+		_start_button_label.text = "START\n30s  ·  best %d" % _best_score
+
+# Fire-and-forget GET submit (survives Apps Script's POST→GET redirect).
+func _submit_score(score: int) -> void:
+	if _http == null or LEADERBOARD_URL == "":
+		return
+	var url := "%s?submit=1&name=%s&score=%d&key=%s" % [
+		LEADERBOARD_URL, PLAYER_INITIALS.uri_encode(), score, LEADERBOARD_KEY.uri_encode()]
+	_http.request(url)
+
+func _load_best() -> void:
+	if FileAccess.file_exists("user://best.txt"):
+		var f := FileAccess.open("user://best.txt", FileAccess.READ)
+		if f != null:
+			_best_score = int(f.get_line())
+			f.close()
+
+func _save_best() -> void:
+	var f := FileAccess.open("user://best.txt", FileAccess.WRITE)
+	if f != null:
+		f.store_line(str(_best_score))
+		f.close()
 
 # Scene handle: grab the chrome bar to drag the whole world. Standard VR world-grab —
 # instead of translating the course (which dragged every physics body through the
