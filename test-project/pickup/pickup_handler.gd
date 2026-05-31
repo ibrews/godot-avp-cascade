@@ -219,10 +219,20 @@ func _ready() -> void:
 	_update_closest_body()
 
 
-# Called every physics frame
-func _physics_process(delta) -> void:
+# Anchor re-pin MUST run at render rate (90 Hz), NOT physics rate (60 Hz). The held
+# body rides this handler 1:1 via reparenting, so the handler's pose is the rendered
+# pose. Re-pinning the origin to the fingertip in _physics_process (60 Hz) injected a
+# periodic position correction sampled by the 90 Hz display = a 3:2 beat saw-tooth
+# (grab_trace.txt: baseline ~1.4 mm/frame, re-pin frames ~5.4 mm, every ~4 frames).
+# Running the re-pin here in _process flattens it: the correction now lands on every
+# rendered frame instead of fighting the display cadence. Pickup/release latch +
+# closest-body detection stay in _physics_process (logic, not visual smoothness).
+func _process(_delta: float) -> void:
 	_update_anchor_from_hand_tracker()
 
+
+# Called every physics frame
+func _physics_process(delta) -> void:
 	# As we move our hands we need to check if the closest body
 	# has changed.
 	_update_closest_body()

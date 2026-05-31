@@ -2,7 +2,35 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
-## ⚠️ STATE (2026-05-31) — READ FIRST
+## ⚠️ STATE (2026-05-31, session 2) — READ FIRST
+
+Device app **v0.1.3-fixA** installed. AWAITING headset re-capture of grab_trace.txt.
+- **Build 1 trace (actual, seq ~3096):** dt clean ~11 ms = 90 Hz render confirmed, no
+  drops. deuler tiny after the grab-snap frame (<1°/frame) → rotation confirmed NOT the
+  cause; HELD_ROT_DAMP is a no-op (remove it). |dpos| mean=7.205 max=18.553 mm — BUT this
+  metric is contaminated by real hand motion (user was moving), so it can't cleanly
+  isolate the saw-tooth. A beat IS visible in steady stretches (e.g. y: −12.4,−4.6,+0.1,
+  −10.2… = jump/decay/jump). Diagnosis direction (positional, render clock clean) holds;
+  for a clean isolation next time, log JERK (2nd difference) not raw |dpos|.
+- **Build 2 = Fix A applied:** moved `_update_anchor_from_hand_tracker()` from
+  `pickup_handler.gd._physics_process` → new `_process` (render rate). Pickup/release
+  latch + `_update_closest_body()` stay in `_physics_process`. Expect re-capture to show
+  |dpos| mean≈max (spikes gone). If confirmed → commit, remove HELD_ROT_DAMP, Task 2.
+
+### (prior) Device seq 3096, v0.1.2-trace — build 1 instrumentation
+- **Build 1 done:** added a one-shot per-render-frame grab trace to
+  `pickup_able_body.gd._process` (ring buffer of 90 frames → `_dump_trace()` writes
+  frame-to-frame |dpos| deltas to `user://grab_trace.txt`). Proves/measures the
+  saw-tooth BEFORE Fix A, so we can confirm Fix A flattens it. Gated behind held +
+  `_trace_done` so it never spams.
+- **NEXT:** Alex grabs a cube ~1.5 s on headset → pull grab_trace.txt → confirm
+  spikes → Build 2 = Fix A (move anchor origin write in
+  `PickupHandler3D._update_anchor_from_hand_tracker()` from `_physics_process` →
+  `_process`). Then re-capture; |dpos| mean should ≈ max (flat).
+- New gated build script: `/tmp/avp_build.sh` (validate→export→xcodebuild→parity→
+  install, single-verdict output). Build 1 ran fully green.
+
+### Prior state (2026-05-31, session 1)
 
 Device seq 3088, app **v0.1.1**. WIP committed.
 - **World handle = WORKING & GREAT** (moves XROrigin, not WorldRoot). Ring reset re-centers.

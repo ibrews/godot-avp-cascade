@@ -44,6 +44,18 @@ const HELD_ROT_DAMP := 0.06
 var _held_rot : Basis = Basis.IDENTITY     # smoothed world orientation while held
 var _held_scale : Vector3 = Vector3.ONE    # preserved so damping never rescales
 
+# --- Per-render-frame grab trace (diagnostic for the POSITIONAL stutter) ---
+# While held, capture (t_usec, global_position, basis euler) every RENDER frame into
+# a ring buffer. After TRACE_FRAMES frames we write the frame-to-frame deltas ONCE to
+# user://grab_trace.txt and stop, so it never spams. The position deltas expose the
+# 60 Hz anchor re-pin saw-tooth on the 90 Hz display (smooth ramp + periodic jump).
+# Build 1 = this trace only (anchor still re-pinned in handler._physics_process, so
+# the saw-tooth should be visible). Build 2 (Fix A) moves the re-pin to render rate;
+# re-capture should then show the per-frame |dpos| go flat.
+const TRACE_FRAMES := 90
+var _trace : Array = []
+var _trace_done := false
+
 
 # Called when this object becomes the closest body in an area
 func add_is_closest(area : Area3D) -> void:
@@ -87,6 +99,13 @@ func _process(_delta: float) -> void:
 	var holder := picked_up_by as Node3D
 	if holder == null:
 		return
+	# Per-render-frame grab trace (one-shot per grab, ~90 frames ≈ 1 s at 90 Hz).
+	# Captured BEFORE the damping rewrites the basis, so it reflects the rendered pose.
+	if not _trace_done:
+		_trace.append([Time.get_ticks_usec(), global_position, global_transform.basis.get_euler()])
+		if _trace.size() >= TRACE_FRAMES:
+			_dump_trace()
+			_trace_done = true
 	var holder_basis := holder.global_transform.basis.orthonormalized()
 	_held_rot = _held_rot.slerp(holder_basis, HELD_ROT_DAMP).orthonormalized()
 	var local := transform
@@ -123,6 +142,8 @@ func pick_up(pick_up_by) -> void:
 	freeze_mode = FREEZE_MODE_STATIC
 	freeze = true
 	_pos_history.clear()
+	_trace.clear()
+	_trace_done = false
 	# Seed the rotational-damping state from the orientation/scale at grab time.
 	_held_rot = global_transform.basis.orthonormalized()
 	_held_scale = global_transform.basis.get_scale()
@@ -192,3 +213,31 @@ func _update_highlight() -> void:
 	for child in get_children():
 		if child is MeshInstance3D:
 			(child as MeshInstance3D).material_overlay = overlay
+
+
+# Write the captured render-frame trace as frame-to-frame deltas to user://grab_trace.txt
+# (lands in the app's Documents on visionOS — pull it the same way as xr_diag.txt).
+# WRITE truncates each dump, so the file always holds the most recent grab's trace.
+func _dump_trace() -> void:
+	var f := FileAccess.open("user://grab_trace.txt", FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string("# grab trace: %d render frames, body=%s\n" % [_trace.size(), name])
+	f.store_string("# dt_ms | dpos_mm x,y,z | |dpos|_mm | deuler_deg x,y,z\n")
+	var sum_mag := 0.0
+	var max_mag := 0.0
+	for i in range(1, _trace.size()):
+		var prev: Array = _trace[i - 1]
+		var cur: Array = _trace[i]
+		var dt_ms := (float(cur[0]) - float(prev[0])) / 1000.0
+		var dpos: Vector3 = (cur[1] - prev[1]) * 1000.0   # metres → mm
+		var deu: Vector3 = cur[2] - prev[2]
+		var mag := dpos.length()
+		sum_mag += mag
+		max_mag = maxf(max_mag, mag)
+		f.store_string("%6.2f | %7.3f %7.3f %7.3f | %7.3f | %6.3f %6.3f %6.3f\n" % [
+			dt_ms, dpos.x, dpos.y, dpos.z, mag,
+			rad_to_deg(deu.x), rad_to_deg(deu.y), rad_to_deg(deu.z)])
+	var n := maxi(1, _trace.size() - 1)
+	f.store_string("# |dpos|_mm  mean=%.3f  max=%.3f  (a flat mean≈max means smooth; spikes = re-pin beat)\n" % [sum_mag / float(n), max_mag])
+	f.close()
