@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.3.0-leaderboard"
+const APP_VERSION := "v0.3.6-aaclean"
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -119,6 +119,7 @@ var _origin_home: Transform3D = Transform3D.IDENTITY  # XROrigin3D rest pose; th
 var _world_env: WorldEnvironment
 var _immersive := false
 var _skybox: MeshInstance3D    # giant inward sphere; toggled to block passthrough
+var _sky_mat: StandardMaterial3D  # stored so the immersion toggle can fade it in/out
 
 # Info panel: a rigid stack (no per-element billboard — we face the whole panel
 # to the camera each frame so the layers never drift apart). _info_accent pulses
@@ -145,7 +146,23 @@ var _start_button: Node3D
 var _start_button_label: Label3D
 var _start_button_mat: StandardMaterial3D
 var _start_cooldown := 0.0
+var _btn_face: Node3D            # mesh+label container that depresses on press
 var _http: HTTPRequest
+
+# --- In-world live leaderboard panel (grabbable, like the info panel) ---
+const LB_REFRESH_SEC := 15.0
+const LB_ROWS := 8
+var _lb_rows_label: Label3D
+var _lb_http: HTTPRequest
+var _lb_refresh_t := 0.0
+
+# Self-destruct buttons: each entry {panel, button}. Poking a panel's red button
+# dissolves the panel (shard burst); a reset (ring-pinch) brings them all back.
+var _panels: Array = []
+var _destruct_cooldown := 0.0
+# #5: smallest grab collider edge — tiny objects get an inflated grab box so they
+# stay easy to pick up (visual mesh unchanged).
+const MIN_GRAB_SIDE := 0.10
 
 func _ready():
 	var interface = XRServer.find_interface("visionOS")
@@ -154,7 +171,15 @@ func _ready():
 		_xr_ok = true
 		var viewport = get_viewport()
 		viewport.use_xr = true
+		# VRS_XR is REQUIRED for the layered compositor to produce output — disabling it
+		# renders nothing (all passthrough). So foveation stays; if it IS the blockiness,
+		# that's an engine-level tune (can't soften the XR density map from GDScript).
 		viewport.vrs_mode = Viewport.VRS_XR
+		# Mixed-mode blockiness is CompositorServices FOVEATION (coarse rasterization-rate
+		# map → blocky alpha tiles against passthrough). Empirically ruled out from GDScript:
+		# MSAA/SSAA crash boot, VRS_DISABLED renders nothing, FXAA does nothing, no glow/SSAO
+		# in the env. The real fix is engine-level: set configuration.isFoveationEnabled=false
+		# in the fork's app_visionos.swift ContentStageConfiguration. See KB.
 		# DO NOT touch the XR render buffer here. Both viewport.msaa_3d (MSAA) AND
 		# viewport.scaling_3d_scale (SSAA/supersample) CRASH AT BOOT on the .layered
 		# foveated CompositorServices target — any multisampled OR resized render
@@ -174,8 +199,14 @@ func _ready():
 	_setup_hands()
 	_http = HTTPRequest.new()
 	add_child(_http)
+	_lb_http = HTTPRequest.new()
+	add_child(_lb_http)
+	_lb_http.request_completed.connect(_on_lb_completed)
 	_load_best()
 	_build_start_button()
+	_build_leaderboard_panel()
+	_build_instructions_panel()
+	_fetch_leaderboard()
 	_write_log("Sandbox built; audio ready; hand tracking active")
 
 func _build_resources():
@@ -195,6 +226,23 @@ func _build_resources():
 func _register_grabbable(b: Node3D) -> void:
 	_grabbables.append(b)
 	_home_transforms[b.get_instance_id()] = b.transform
+	_ensure_min_grab_collider(b)
+
+# Inflate a grabbable's collision shape so its biggest side is >= MIN_GRAB_SIDE,
+# making small objects easy to grab. Visual mesh is untouched. Box + sphere only.
+func _ensure_min_grab_collider(b: Node3D) -> void:
+	for child in b.get_children():
+		if child is CollisionShape3D:
+			var sh: Shape3D = (child as CollisionShape3D).shape
+			if sh is BoxShape3D:
+				var s: Vector3 = (sh as BoxShape3D).size
+				var mx: float = maxf(s.x, maxf(s.y, s.z))
+				if mx > 0.0 and mx < MIN_GRAB_SIDE:
+					(sh as BoxShape3D).size = s * (MIN_GRAB_SIDE / mx)
+			elif sh is SphereShape3D:
+				if (sh as SphereShape3D).radius < MIN_GRAB_SIDE * 0.5:
+					(sh as SphereShape3D).radius = MIN_GRAB_SIDE * 0.5
+			return
 
 func _build_plate(y: float, z: float, x_rot_deg: float) -> void:
 	var plate := PickupAbleBody3D.new()
@@ -285,16 +333,18 @@ func _build_static_scene():
 	sky_sphere.height = 16.0
 	sky_sphere.is_hemisphere = false
 	_skybox.mesh = sky_sphere
-	var sky_mat := StandardMaterial3D.new()
-	sky_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	sky_mat.cull_mode = BaseMaterial3D.CULL_FRONT  # render inside faces
+	_sky_mat = StandardMaterial3D.new()
+	_sky_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_sky_mat.cull_mode = BaseMaterial3D.CULL_FRONT  # render inside faces
+	# OPAQUE — it must fully occlude passthrough for immersive mode. (The dissolve
+	# effect is carried by the shard burst, not by fading this material.)
 	# Vertical gradient via a simple emissive deep-space blue; bright enough to lift
 	# the previously-black scene and give metals something to reflect.
-	sky_mat.albedo_color = Color(0.06, 0.09, 0.18)
-	sky_mat.emission_enabled = true
-	sky_mat.emission = Color(0.10, 0.16, 0.32)
-	sky_mat.emission_energy_multiplier = 0.8
-	_skybox.mesh.surface_set_material(0, sky_mat)
+	_sky_mat.albedo_color = Color(0.06, 0.09, 0.18)
+	_sky_mat.emission_enabled = true
+	_sky_mat.emission = Color(0.10, 0.16, 0.32)
+	_sky_mat.emission_energy_multiplier = 0.8
+	_skybox.mesh.surface_set_material(0, _sky_mat)
 	_skybox.position = Vector3(0.0, 1.3, 0.0)
 	_skybox.visible = false
 	add_child(_skybox)
@@ -373,7 +423,10 @@ func _build_static_scene():
 
 	# Goal portal.
 	_portal = GoalPortal3D.new()
-	_portal.position = Vector3(-0.55, PLATE_HEIGHT + 0.10, FORWARD_Z)
+	# Bottom-center of the cascade, ring standing VERTICAL (hole faces the user /
+	# the cascade flow) and clear of the plates. Still grabbable — grab-and-aim.
+	_portal.position = Vector3(0.0, PLATE_HEIGHT - 0.78, FORWARD_Z + 0.12)
+	_portal.rotation_degrees = Vector3(0.0, 0.0, 0.0)
 	_portal.cube_entered.connect(_on_portal_entered)
 	_world_root.add_child(_portal)
 	_register_grabbable(_portal)
@@ -514,6 +567,7 @@ func _build_info_panel() -> void:
 	cs.position = Vector3(0.0, center_y, 0.0)
 	root.add_child(cs)
 	_register_grabbable(root)
+	_attach_destruct_button(root, Vector3(0.0, center_y - size_y * 0.5 - 0.045, 0.0))
 
 # A billboard-free Label3D for the info panel (the panel faces the camera as a unit).
 func _panel_label(txt: String, fsize: int, col: Color, outline: int) -> Label3D:
@@ -590,6 +644,8 @@ func _process(delta: float):
 
 	_update_info_panel(delta)
 	_update_timer(delta)
+	_update_leaderboard(delta)
+	_update_destruct(delta)
 	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
 	# the origin about the pinch midpoint) is the next step; per-object scale stays off.
@@ -648,6 +704,7 @@ func _spawn_cube():
 	sh.size = Vector3(size, size, size)
 	cs.shape = sh
 	cube.add_child(cs)
+	_ensure_min_grab_collider(cube)  # #5: small cubes get a grab-friendly collider
 
 	# Per-cube particle trail.
 	var pmat := StandardMaterial3D.new()
@@ -918,6 +975,13 @@ func _reset_sandbox():
 			if b is RigidBody3D:
 				b.linear_velocity = Vector3.ZERO
 				b.angular_velocity = Vector3.ZERO
+	# Bring back any self-destructed panels.
+	for entry in _panels:
+		var p: Node3D = entry["panel"]
+		if is_instance_valid(p):
+			p.visible = true
+			if p is CollisionObject3D:
+				(p as CollisionObject3D).collision_layer = LAYER_GRAB_ONLY
 	if is_instance_valid(_portal):
 		_portal.reset_total()
 	_write_log("Sandbox reset")
@@ -1080,13 +1144,54 @@ func _index_pinch_point(side: String):
 # sphere geometry occludes passthrough.
 func _toggle_immersion() -> void:
 	_immersive = not _immersive
+	var center := Vector3(0.0, 1.4, 0.0)
+	var cam := get_viewport().get_camera_3d()
+	if cam != null:
+		center = cam.global_position
+	# Opaque sky snaps on/off (so it actually occludes); shards carry the transition.
 	if _skybox != null:
 		_skybox.visible = _immersive
-	# Immersion = deep rising sweep (world closing in); mixed = airy falling sweep.
 	if _immersive:
-		_push_sweep(220.0, 660.0, 0.35)
+		_shard_burst(center, 2.4, Color(0.45, 0.65, 1.0), false, 40)  # converge
+		_push_sweep(300.0, 900.0, 0.30)                               # rising (hand "show")
 	else:
-		_push_sweep(660.0, 220.0, 0.30)
+		_shard_burst(center, 2.4, Color(0.80, 0.88, 1.0), true, 40)   # outward
+		_push_sweep(900.0, 300.0, 0.30)                               # falling (hand "hide")
+
+# Shared shard effect — small emissive cubes that fly outward (dissolve) or
+# converge inward (materialize) around a center. Used by the immersion toggle and
+# the panel self-destruct buttons; same spirit as the hand-mesh dissolve.
+func _shard_burst(center: Vector3, spread: float, color: Color, outward: bool, count: int = 28) -> void:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(color.r, color.g, color.b, 0.95)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 2.4
+	var shard := BoxMesh.new()
+	shard.size = Vector3(0.02, 0.02, 0.02)
+	shard.material = mat
+	for i in range(count):
+		var dir := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1))
+		if dir.length() < 0.01:
+			dir = Vector3.UP
+		dir = dir.normalized()
+		var mi := MeshInstance3D.new()
+		mi.mesh = shard
+		add_child(mi)
+		var edge := center + dir * spread + Vector3(0, -0.1, 0)
+		var tw := create_tween().set_parallel(true)
+		if outward:
+			mi.global_position = center + dir * (spread * 0.25)
+			tw.tween_property(mi, "global_position", edge, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.tween_property(mi, "scale", Vector3.ZERO, 0.5)
+		else:
+			mi.global_position = edge
+			mi.scale = Vector3.ONE * 1.3
+			tw.tween_property(mi, "global_position", center + dir * (spread * 0.25), 0.45).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+			tw.tween_property(mi, "scale", Vector3.ONE * 0.3, 0.45)
+		tw.chain().tween_callback(mi.queue_free)
 
 # --- Time-attack mode -------------------------------------------------------
 
@@ -1096,6 +1201,11 @@ func _build_start_button() -> void:
 	_start_button.name = "StartButton"
 	_start_button.position = Vector3(0.42, 1.20, -0.45)
 	add_child(_start_button)
+
+	# Mesh + label live on a face container that depresses on press; the label is
+	# NOT billboarded so it stays fixed on the button face (faces +Z toward the user).
+	_btn_face = Node3D.new()
+	_start_button.add_child(_btn_face)
 
 	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
@@ -1108,7 +1218,7 @@ func _build_start_button() -> void:
 	_start_button_mat.emission = Color(0.20, 0.95, 0.45)
 	_start_button_mat.emission_energy_multiplier = 1.2
 	mi.material_override = _start_button_mat
-	_start_button.add_child(mi)
+	_btn_face.add_child(mi)
 
 	_start_button_label = Label3D.new()
 	_start_button_label.font_size = 34
@@ -1116,13 +1226,12 @@ func _build_start_button() -> void:
 	_start_button_label.modulate = Color.WHITE
 	_start_button_label.outline_modulate = Color(0, 0, 0, 0.9)
 	_start_button_label.pixel_size = 0.0005
-	_start_button_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	_start_button_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_start_button_label.position = Vector3(0, 0, 0.02)
-	_start_button.add_child(_start_button_label)
+	_start_button_label.position = Vector3(0, 0, 0.017)   # sits just proud of the face
+	_btn_face.add_child(_start_button_label)
 	_refresh_button_label()
 
-# Tick the round, or watch for a finger poke to start one.
+# Tick the active round, and watch for a finger poke to start OR restart one.
 func _update_timer(delta: float) -> void:
 	_start_cooldown = max(0.0, _start_cooldown - delta)
 	if _timer_active:
@@ -1133,14 +1242,40 @@ func _update_timer(delta: float) -> void:
 		_refresh_button_label()
 		if _timer_remaining <= 0.0:
 			_end_round()
-		return
+
+	# Poke (start when idle, restart when active) — gated by a short cooldown.
 	if _start_cooldown > 0.0 or _start_button == null:
 		return
 	for side in ["left_hand", "right_hand"]:
 		var tip = _index_tip_world(side)
 		if tip != null and (tip as Vector3).distance_to(_start_button.global_position) <= 0.08:
-			_start_round()
+			_press_button()
+			if _timer_active:
+				_cancel_round()   # abort to neutral; a SECOND press restarts the 30s
+			else:
+				_start_round()
 			break
+
+# Satisfying click: depress the button face and play a crisp tick.
+func _press_button() -> void:
+	_push_click()
+	if _btn_face != null:
+		var tw := create_tween()
+		tw.tween_property(_btn_face, "position:z", -0.018, 0.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.tween_property(_btn_face, "position:z", 0.0, 0.11).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+# Short percussive UI tick (two fast blips) for the button press.
+func _push_click() -> void:
+	if _audio_playback == null:
+		return
+	var dur := 0.045
+	var n := int(SAMPLE_RATE * dur)
+	var to_fill: int = min(n, _audio_playback.get_frames_available())
+	for i in range(to_fill):
+		var t := float(i) / SAMPLE_RATE
+		var u := t / dur
+		var s := (sin(TAU * 1500.0 * t) * 0.5 + sin(TAU * 2300.0 * t) * 0.3) * exp(-26.0 * u)
+		_audio_playback.push_frame(Vector2(s, s))
 
 # Index fingertip in WORLD space (tracking-space joint rendered through XROrigin,
 # same compensation as the hand mesh — so the poke matches where the finger looks).
@@ -1154,6 +1289,18 @@ func _index_tip_world(side: String):
 		return null
 	var origin := $XROrigin3D as Node3D
 	return origin.global_transform * ht.get_hand_joint_transform(idx).origin
+
+# Abort an in-progress round: flash the button red, settle back to neutral green,
+# and do NOT restart. The player must press again to begin a fresh 30 s.
+func _cancel_round() -> void:
+	_timer_active = false
+	_timer_remaining = 0.0
+	_round_score = 0
+	_start_cooldown = 0.8   # ignore the lingering finger so it doesn't instantly restart
+	_refresh_button_label()
+	_start_button_mat.emission = Color(1.0, 0.15, 0.15)
+	var tw := create_tween()
+	tw.tween_property(_start_button_mat, "emission", Color(0.20, 0.95, 0.45), 0.45)
 
 func _start_round() -> void:
 	_timer_active = true
@@ -1196,6 +1343,101 @@ func _submit_score(score: int) -> void:
 		LEADERBOARD_URL, PLAYER_INITIALS.uri_encode(), score, LEADERBOARD_KEY.uri_encode()]
 	_http.request(url)
 
+# Grabbable in-world leaderboard panel (top scores, auto-refreshing). Movable +
+# scalable like the info panel (PickupAbleBody3D, layer 2, stays where placed).
+func _build_leaderboard_panel() -> void:
+	var root := PickupAbleBody3D.new()
+	root.name = "LeaderboardPanel"
+	root.position = Vector3(0.5, 1.55, -0.7)   # mirror of the info panel (right side)
+	root.collision_layer = LAYER_GRAB_ONLY
+	root.collision_mask = 0
+	root.freeze = true
+	root.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	root.freeze_on_release = true
+	add_child(root)
+
+	var size_x := 0.34
+	var size_y := 0.40
+
+	# Accent + dark backing (same look as the info panel).
+	var accent_mat := StandardMaterial3D.new()
+	accent_mat.albedo_color = Color(0.30, 0.80, 1.0, 0.30)
+	accent_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	accent_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	accent_mat.emission_enabled = true
+	accent_mat.emission = Color(0.30, 0.80, 1.0)
+	var accent := MeshInstance3D.new()
+	var aq := QuadMesh.new()
+	aq.size = Vector2(size_x + 0.016, size_y + 0.016)
+	accent.mesh = aq
+	accent.material_override = accent_mat
+	accent.position = Vector3(0, 0, -0.004)
+	root.add_child(accent)
+
+	var bg := MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(size_x, size_y)
+	bg.mesh = quad
+	var bgmat := StandardMaterial3D.new()
+	bgmat.albedo_color = Color(0.03, 0.03, 0.05, 0.82)
+	bgmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bgmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg.material_override = bgmat
+	root.add_child(bg)
+
+	var title := _panel_label("◆ LEADERBOARD ◆", 30, Color(0.40, 0.90, 1.0, 1.0), 7)
+	title.position = Vector3(0, size_y * 0.5 - 0.035, 0.006)
+	root.add_child(title)
+
+	_lb_rows_label = _panel_label("loading…", 24, Color(1, 1, 1, 0.96), 5)
+	_lb_rows_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_lb_rows_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	_lb_rows_label.position = Vector3(-size_x * 0.5 + 0.03, size_y * 0.5 - 0.085, 0.006)
+	root.add_child(_lb_rows_label)
+
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(size_x, size_y, 0.03)
+	cs.shape = box
+	root.add_child(cs)
+	_register_grabbable(root)
+	_attach_destruct_button(root, Vector3(0.0, -size_y * 0.5 - 0.045, 0.0))
+
+func _update_leaderboard(delta: float) -> void:
+	_lb_refresh_t -= delta
+	if _lb_refresh_t <= 0.0:
+		_lb_refresh_t = LB_REFRESH_SEC
+		_fetch_leaderboard()
+
+func _fetch_leaderboard() -> void:
+	if _lb_http == null or LEADERBOARD_URL == "":
+		return
+	_lb_http.request("%s?top=%d" % [LEADERBOARD_URL, LB_ROWS])
+
+func _on_lb_completed(_result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	if _lb_rows_label == null:
+		return
+	if code != 200:
+		_lb_rows_label.text = "offline"
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY or not parsed.has("scores"):
+		_lb_rows_label.text = "offline"
+		return
+	var scores: Array = parsed["scores"]
+	if scores.is_empty():
+		_lb_rows_label.text = "no scores yet —\nbe the first!"
+		return
+	var lines := PackedStringArray()
+	var i := 1
+	for s in scores:
+		var nm := str(s.get("name", "AAA"))
+		if nm.length() > 8:
+			nm = nm.substr(0, 8)
+		lines.append("%2d  %-8s %5d" % [i, nm, int(s.get("score", 0))])
+		i += 1
+	_lb_rows_label.text = "\n".join(lines)
+
 func _load_best() -> void:
 	if FileAccess.file_exists("user://best.txt"):
 		var f := FileAccess.open("user://best.txt", FileAccess.READ)
@@ -1208,6 +1450,149 @@ func _save_best() -> void:
 	if f != null:
 		f.store_line(str(_best_score))
 		f.close()
+
+# Floating cold-open explainer: goal of the game + control map, with small 3D
+# icon "diagrams". Grabbable/movable like the other panels (and self-destructible).
+func _build_instructions_panel() -> void:
+	var root := PickupAbleBody3D.new()
+	root.name = "InstructionsPanel"
+	root.position = Vector3(0.0, 2.05, -1.0)   # prominent + centered for a cold open
+	root.collision_layer = LAYER_GRAB_ONLY
+	root.collision_mask = 0
+	root.freeze = true
+	root.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	root.freeze_on_release = true
+	add_child(root)
+
+	var size_x := 0.52
+	var size_y := 0.46
+
+	# Accent + dark backing.
+	var accent_mat := StandardMaterial3D.new()
+	accent_mat.albedo_color = Color(1.0, 0.55, 0.10, 0.30)
+	accent_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	accent_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	accent_mat.emission_enabled = true
+	accent_mat.emission = Color(1.0, 0.55, 0.10)
+	var accent := MeshInstance3D.new()
+	var aq := QuadMesh.new()
+	aq.size = Vector2(size_x + 0.016, size_y + 0.016)
+	accent.mesh = aq
+	accent.material_override = accent_mat
+	accent.position = Vector3(0, 0, -0.004)
+	root.add_child(accent)
+
+	var bg := MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(size_x, size_y)
+	bg.mesh = quad
+	var bgmat := StandardMaterial3D.new()
+	bgmat.albedo_color = Color(0.03, 0.03, 0.05, 0.85)
+	bgmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bgmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg.material_override = bgmat
+	root.add_child(bg)
+
+	var title := _panel_label("HOW TO PLAY", 36, Color(1.0, 0.80, 0.30, 1.0), 8)
+	title.position = Vector3(0, size_y * 0.5 - 0.04, 0.006)
+	root.add_child(title)
+
+	var goal := _panel_label(
+		"Cubes cascade from the emitter.\nGrab & arrange the plates, ramps,\nbubble and goal ring to route\nthem in. Most points in 30s wins!",
+		22, Color(0.92, 0.95, 1.0, 1.0), 5)
+	goal.position = Vector3(0, size_y * 0.5 - 0.135, 0.006)
+	root.add_child(goal)
+
+	var controls := _panel_label(
+		"index pinch    grab & move\nmiddle pinch   show / hide hands\nring pinch     reset everything\npinky pinch    immersive sky\npoke START     30s time attack\ngrab the bar   move the world",
+		20, Color(0.62, 0.92, 1.0, 1.0), 5)
+	controls.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	controls.position = Vector3(0, -size_y * 0.5 + 0.10, 0.006)
+	root.add_child(controls)
+
+	# Tiny 3D "diagram" icons flanking the title: a goal ring + a cube.
+	var ring_icon := MeshInstance3D.new()
+	var tm := TorusMesh.new()
+	tm.inner_radius = 0.012
+	tm.outer_radius = 0.022
+	ring_icon.mesh = tm
+	var rmat := StandardMaterial3D.new()
+	rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	rmat.albedo_color = Color(0.30, 0.85, 1.0)
+	rmat.emission_enabled = true
+	rmat.emission = Color(0.30, 0.85, 1.0)
+	ring_icon.material_override = rmat
+	ring_icon.position = Vector3(-size_x * 0.5 + 0.05, size_y * 0.5 - 0.04, 0.01)
+	root.add_child(ring_icon)
+
+	var cube_icon := MeshInstance3D.new()
+	var cbm := BoxMesh.new()
+	cbm.size = Vector3(0.03, 0.03, 0.03)
+	cube_icon.mesh = cbm
+	var cmat := StandardMaterial3D.new()
+	cmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	cmat.albedo_color = Color(1.0, 0.55, 0.10)
+	cmat.emission_enabled = true
+	cmat.emission = Color(1.0, 0.55, 0.10)
+	cube_icon.material_override = cmat
+	cube_icon.position = Vector3(size_x * 0.5 - 0.05, size_y * 0.5 - 0.04, 0.01)
+	cube_icon.rotation_degrees = Vector3(20, 35, 0)
+	root.add_child(cube_icon)
+
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(size_x, size_y, 0.03)
+	cs.shape = box
+	root.add_child(cs)
+	_register_grabbable(root)
+	_attach_destruct_button(root, Vector3(0.0, -size_y * 0.5 - 0.05, 0.0))
+
+# Attach a small red self-destruct button beneath a panel (child, so it rides the
+# panel when moved). Poke it to dissolve the panel; reset brings it back.
+func _attach_destruct_button(panel: Node3D, local_pos: Vector3) -> void:
+	var btn := Node3D.new()
+	btn.name = "Destruct"
+	btn.position = local_pos
+	var mi := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.022
+	sm.height = 0.044
+	mi.mesh = sm
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.85, 0.06, 0.06)
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	m.emission_enabled = true
+	m.emission = Color(1.0, 0.12, 0.12)
+	m.emission_energy_multiplier = 1.6
+	mi.material_override = m
+	btn.add_child(mi)
+	panel.add_child(btn)
+	_panels.append({"panel": panel, "button": btn})
+
+# Watch for a finger poke on any panel's destruct button.
+func _update_destruct(delta: float) -> void:
+	_destruct_cooldown = maxf(0.0, _destruct_cooldown - delta)
+	if _destruct_cooldown > 0.0:
+		return
+	for entry in _panels:
+		var panel: Node3D = entry["panel"]
+		var btn: Node3D = entry["button"]
+		if panel == null or not is_instance_valid(panel) or not panel.visible:
+			continue
+		for side in ["left_hand", "right_hand"]:
+			var tip = _index_tip_world(side)
+			if tip != null and (tip as Vector3).distance_to(btn.global_position) <= 0.05:
+				_dissolve_panel(panel)
+				_destruct_cooldown = 0.6
+				return
+
+# Explode a panel into shards and hide it (un-grabbable until a reset restores it).
+func _dissolve_panel(panel: Node3D) -> void:
+	_shard_burst(panel.global_position, 0.28, Color(1.0, 0.30, 0.20), true, 32)
+	panel.visible = false
+	if panel is CollisionObject3D:
+		(panel as CollisionObject3D).collision_layer = 0
+	_push_sweep(900.0, 240.0, 0.32)
 
 # Scene handle: grab the chrome bar to drag the whole world. Standard VR world-grab —
 # instead of translating the course (which dragged every physics body through the
