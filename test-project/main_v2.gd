@@ -8,7 +8,12 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.7.1-scalefix2"  # FIX two-writer scale glitch: freeze holding handler's fingertip-follow during two-hand scale
+const APP_VERSION := "v0.8.0-controls"  # grab-pivot fix + high-score fireworks/cheer + ONE 6-button control panel + dissolve-sound polish
+
+# Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
+# tween AND the dissolve sound are BOTH driven from this one constant, so they always
+# match — change it here and both follow. See _toggle_immersion / _push_dissolve_texture.
+const SKY_DISSOLVE_SEC := 0.8
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -190,31 +195,27 @@ var _timer_active := false
 var _timer_remaining := 0.0
 var _round_score := 0
 var _best_score := 0
+# All six buttons now live on the unified control panel (_build_control_panel) and share
+# the poke-button registry. These handles point at the relevant registry entries' label/
+# material/node so the bespoke per-frame logic (round countdown/pulse + label refreshers)
+# keeps working. The START node handle is also used for the round-end burst position.
 var _start_button: Node3D
 var _start_button_label: Label3D
 var _start_button_mat: StandardMaterial3D
 var _start_cooldown := 0.0
-var _btn_face: Node3D            # mesh+label container that depresses on press
 var _http: HTTPRequest
 
-# Real Persona-arm (upper-limb passthrough) toggle — a pokable button distinct from
-# the virtual GLTF hand mesh (_hand_mesh_visible / middle-pinch). It writes
-# user://upper_limb.txt ("visible"/"hidden"); the recompiled visionOS engine polls
-# that file (~0.5s) and applies it to SwiftUI .upperLimbVisibility live — no relaunch.
-var _arms_button: Node3D
+# HANDS-mode button (virtual GLTF mesh ↔ real Persona arms). Writes user://upper_limb.txt
+# ("visible"/"hidden"); the recompiled visionOS engine polls that file (~0.5s) and applies
+# it to SwiftUI .upperLimbVisibility live — no relaunch.
 var _arms_button_label: Label3D
 var _arms_button_mat: StandardMaterial3D
 
 # Mute toggle (sound on/off).
 var _muted := false
-var _mute_button: Node3D
-var _mute_btn_face: Node3D
 var _mute_button_label: Label3D
 var _mute_button_mat: StandardMaterial3D
-var _mute_cooldown := 0.0
-var _arms_btn_face: Node3D
 var _real_arms_visible := false
-var _arms_cooldown := 0.0
 
 # --- In-world live leaderboard panel (grabbable, like the info panel) ---
 const LB_REFRESH_SEC := 15.0
@@ -222,6 +223,9 @@ const LB_ROWS := 8
 var _lb_rows_label: Label3D
 var _lb_http: HTTPRequest
 var _lb_refresh_t := 0.0
+# Top online score from the last leaderboard fetch (0 if unknown/offline). Used at
+# round end to decide the BIGGER "you beat the WORLD" celebration vs the personal best.
+var _lb_top_score := 0
 
 # Self-destruct buttons: each entry {panel, button}. Poking a panel's red button
 # dissolves the panel (shard burst); a reset (ring-pinch) brings them all back.
@@ -270,11 +274,8 @@ func _ready():
 	add_child(_lb_http)
 	_lb_http.request_completed.connect(_on_lb_completed)
 	_load_best()
-	_build_start_button()
 	_load_arms_pref()
-	_build_arms_button()
-	_build_mute_button()
-	_build_gesture_panel()
+	_build_control_panel()   # ONE panel: HANDS/START/MUTE/GESTURES/SKY/RESET + BEST readout
 	_build_leaderboard_panel()
 	_build_instructions_panel()
 	_fetch_leaderboard()
@@ -536,7 +537,7 @@ func _setup_audio():
 	_shared_audio = AudioStreamPlayer3D.new()
 	var gen := AudioStreamGenerator.new()
 	gen.mix_rate = SAMPLE_RATE
-	gen.buffer_length = 0.6  # room for the one-shot score fanfare (boom is ~0.55s)
+	gen.buffer_length = 1.0  # room for the one-shot score fanfare (~0.55s) AND the high-score crowd cheer (up to ~0.95s)
 	_shared_audio.stream = gen
 	_shared_audio.volume_db = -3.0
 	_shared_audio.max_distance = 5.0
@@ -751,8 +752,6 @@ func _process(delta: float):
 	_update_info_panel(delta)
 	_update_timer(delta)
 	_update_music_bed(delta)
-	_update_arms_button(delta)
-	_update_mute_button(delta)
 	_update_poke_buttons(delta)
 	_update_leaderboard(delta)
 	_update_destruct(delta)
@@ -1406,52 +1405,78 @@ func _toggle_immersion() -> void:
 		if _sky_mat != null:
 			_sky_mat.set_shader_parameter("dissolve", 0.0)
 			var tw := create_tween()
-			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 0.0, 1.0, 0.8).set_trans(Tween.TRANS_SINE)
+			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 0.0, 1.0, SKY_DISSOLVE_SEC).set_trans(Tween.TRANS_SINE)
 		_shard_burst(center, 2.6, Color(0.45, 0.65, 1.0), false, 48)  # converge / materialize
-		_push_dissolve_texture(true)                                  # rain/typing, rising pitch
+		_push_dissolve_texture(true)                                  # textured swell, rising pitch
 	else:
 		if _sky_mat != null:
 			var tw := create_tween()
-			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 1.0, 0.0, 0.8).set_trans(Tween.TRANS_SINE)
+			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 1.0, 0.0, SKY_DISSOLVE_SEC).set_trans(Tween.TRANS_SINE)
 			tw.tween_callback(func(): if _skybox != null: _skybox.visible = false)
 		_shard_burst(center, 2.6, Color(0.80, 0.88, 1.0), true, 48)   # scatter / dissolve
-		_push_dissolve_texture(false)                                 # rain/typing, falling pitch
+		_push_dissolve_texture(false)                                 # textured swell, falling pitch
 
-# Granular "rain / keyboard-typing" texture spanning the WHOLE 0.8 s sky dissolve —
-# a stream of short scale-snapped ticks scheduled across the transition (pitch rising
-# for materialize, falling for dissolve). Textured/organic, not a single tone. Each
-# tick re-checks _muted at fire time so muting mid-transition silences the rest.
+# Textured tonal SWELL spanning the WHOLE sky transition (length = SKY_DISSOLVE_SEC, so it
+# always matches the shader tween). A handful of well-SPACED, VARIED in-key ticks — each with
+# its own pitch, timbre and decay — so it reads as a pleasant shimmer rather than the old
+# glitchy 30-drop burst. Pitch climbs on materialize / falls on dissolve, and the ticks bunch
+# slightly toward the middle of the transition (swell) instead of a flat metronome. Each tick
+# re-checks _muted at fire time so muting mid-transition silences the rest.
 func _push_dissolve_texture(rising: bool) -> void:
-	# Centre the shared 3D player on the user so the rain isn't stuck at the last
+	# Centre the shared 3D player on the user so the swell isn't stuck at the last
 	# cube-collision point (which could be far/quiet).
 	var cam := get_viewport().get_camera_3d()
 	if _shared_audio != null and cam != null:
 		_shared_audio.position = cam.global_position
-	var span := 0.78
-	var ticks := 30
+	var span := SKY_DISSOLVE_SEC
+	# ~13 ticks across the whole span = far fewer/slower than the old 30; spaced so adjacent
+	# ticks don't blur into a buzz. Tied to span so a longer transition gets proportionally more.
+	var ticks := int(round(span / 0.06))
 	for i in range(ticks):
-		var u := float(i) / float(ticks - 1)
-		# Jittered schedule so it reads as organic rain/typing, not a metronome.
-		var at: float = clampf(u * span + randf_range(-0.015, 0.015), 0.0, span)
+		var u := float(i) / float(maxi(1, ticks - 1))
+		# Ease-in-out schedule: ticks bunch toward the middle (a swell), sparse at the ends.
+		var sched := u - 0.18 * sin(TAU * u) / TAU
+		var at: float = clampf(sched * span + randf_range(-0.012, 0.012), 0.0, span)
 		var prog := u if rising else (1.0 - u)
-		var base: float = lerp(320.0, 1500.0, prog) * randf_range(0.85, 1.18)
+		# Pitch ramps across the transition; widen the random spread so no two ticks share a note.
+		var base: float = lerp(300.0, 1500.0, prog) * randf_range(0.78, 1.28)
 		var freq := _snap_to_scale(base)
-		get_tree().create_timer(at).timeout.connect(_push_tick.bind(freq))
+		# Per-tick timbre variety: 0=pure drop, 1=two-partial bell, 2=detuned/woody.
+		var timbre := i % 3
+		# Vary decay so some ticks ping short, others ring a touch longer (organic, not uniform).
+		var decay: float = randf_range(28.0, 60.0)
+		# Amplitude swells in the middle of the transition so it grows then settles.
+		var amp: float = (0.18 + 0.22 * sin(PI * u)) * randf_range(0.85, 1.1)
+		get_tree().create_timer(at).timeout.connect(_push_tick.bind(freq, timbre, decay, amp))
 
-# One short raindrop / keystroke tick: a fast-decaying pitched blip with a click
-# transient. Mute is checked here (not at schedule time) so it can stop mid-stream.
-func _push_tick(freq: float) -> void:
+# One short in-key tick with per-call variety. `timbre` picks the spectral character,
+# `decay` the ring length, `amp` the level — passed per tick so the stream is textured
+# and varied rather than identical drops. Mute is checked here (not at schedule time) so
+# it can stop mid-stream.
+func _push_tick(freq: float, timbre: int, decay: float, amp: float) -> void:
 	if _muted or _audio_playback == null:
 		return
-	var dur := 0.028
+	# Longer-decaying ticks get a slightly longer buffer so the ring isn't clipped.
+	var dur: float = clampf(3.0 / decay, 0.030, 0.075)
 	var n := int(SAMPLE_RATE * dur)
 	var to_fill: int = min(n, _audio_playback.get_frames_available())
 	for i in range(to_fill):
 		var t := float(i) / SAMPLE_RATE
 		var u := t / dur
-		var s := sin(TAU * freq * t) * exp(-46.0 * u) * 0.32
-		s += (randf() * 2.0 - 1.0) * exp(-120.0 * u) * 0.10   # click transient
-		_audio_playback.push_frame(Vector2(s, s))
+		var env := exp(-decay * u)
+		var s: float
+		match timbre:
+			1:
+				# Bell: fundamental + soft octave shimmer.
+				s = (sin(TAU * freq * t) * 0.8 + sin(TAU * freq * 2.0 * t) * 0.28) * env
+			2:
+				# Woody: fundamental + a slightly detuned partial = gentle beating/warble.
+				s = (sin(TAU * freq * t) + sin(TAU * freq * 1.005 * t) * 0.6) * 0.6 * env
+			_:
+				# Pure pitched drop with a soft click transient.
+				s = sin(TAU * freq * t) * env
+				s += (randf() * 2.0 - 1.0) * exp(-130.0 * u) * 0.08
+		_audio_playback.push_frame(Vector2(s * amp, s * amp))
 
 # Shared shard effect — small emissive cubes that fly outward (dissolve) or
 # converge inward (materialize) around a center. Used by the immersion toggle and
@@ -1490,74 +1515,21 @@ func _shard_burst(center: Vector3, spread: float, color: Color, outward: bool, c
 
 # --- Time-attack mode -------------------------------------------------------
 
-# Build the pokable START button (reachable, near the world handle).
-func _build_start_button() -> void:
-	_start_button = Node3D.new()
-	_start_button.name = "StartButton"
-	_start_button.position = Vector3(0.42, 1.20, -0.45)
-	add_child(_start_button)
-
-	# Mesh + label live on a face container that depresses on press; the label is
-	# NOT billboarded so it stays fixed on the button face (faces +Z toward the user).
-	_btn_face = Node3D.new()
-	_start_button.add_child(_btn_face)
-
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(0.17, 0.085, 0.03)
-	mi.mesh = bm
-	_start_button_mat = StandardMaterial3D.new()
-	_start_button_mat.albedo_color = Color(0.10, 0.42, 0.24)
-	_start_button_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	_start_button_mat.emission_enabled = true
-	_start_button_mat.emission = Color(0.20, 0.95, 0.45)
-	_start_button_mat.emission_energy_multiplier = 1.2
-	mi.material_override = _start_button_mat
-	_btn_face.add_child(mi)
-
-	_start_button_label = Label3D.new()
-	_start_button_label.font_size = 34
-	_start_button_label.outline_size = 8
-	_start_button_label.modulate = Color.WHITE
-	_start_button_label.outline_modulate = Color(0, 0, 0, 0.9)
-	_start_button_label.pixel_size = 0.0005
-	_start_button_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_start_button_label.position = Vector3(0, 0, 0.017)   # sits just proud of the face
-	_btn_face.add_child(_start_button_label)
-	_refresh_button_label()
-
-# Tick the active round, and watch for a finger poke to start OR restart one.
+# Tick the active round (countdown + red urgency pulse). The START press itself is now
+# handled by the shared poke registry (button callback = _gp_start), so there's no
+# fingertip-poll here anymore — just the per-frame visuals while a round runs.
 func _update_timer(delta: float) -> void:
 	_start_cooldown = max(0.0, _start_cooldown - delta)
-	if _timer_active:
-		_timer_remaining -= delta
-		# Pulse the button red as time runs low.
+	if not _timer_active:
+		return
+	_timer_remaining -= delta
+	# Pulse the button red as time runs low.
+	if _start_button_mat != null:
 		var urgency := 1.0 - clampf(_timer_remaining / ROUND_SECONDS, 0.0, 1.0)
 		_start_button_mat.emission = Color(0.2 + urgency * 0.8, 0.9 - urgency * 0.7, 0.45 - urgency * 0.3)
-		_refresh_button_label()
-		if _timer_remaining <= 0.0:
-			_end_round()
-
-	# Poke (start when idle, restart when active) — gated by a short cooldown.
-	if _start_cooldown > 0.0 or _start_button == null:
-		return
-	for side in ["left_hand", "right_hand"]:
-		var tip = _index_tip_world(side)
-		if tip != null and (tip as Vector3).distance_to(_start_button.global_position) <= 0.08:
-			_press_button()
-			if _timer_active:
-				_cancel_round()   # abort to neutral; a SECOND press restarts the 30s
-			else:
-				_start_round()
-			break
-
-# Satisfying click: depress the button face and play a crisp tick.
-func _press_button() -> void:
-	_push_click()
-	if _btn_face != null:
-		var tw := create_tween()
-		tw.tween_property(_btn_face, "position:z", -0.018, 0.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		tw.tween_property(_btn_face, "position:z", 0.0, 0.11).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_refresh_button_label()
+	if _timer_remaining <= 0.0:
+		_end_round()
 
 # Short percussive UI tick (two fast blips) for the button press.
 func _push_click() -> void:
@@ -1638,7 +1610,12 @@ func _end_round() -> void:
 	_timer_active = false
 	_timer_remaining = 0.0
 	var final_score := _round_score
-	if final_score > _best_score:
+	# Decide the celebration tier BEFORE we overwrite _best_score: beating the online
+	# leaderboard top = WORLD record (tier 2, biggest), beating only your own best =
+	# personal best (tier 1, big), otherwise just the normal cash-out fanfare (tier 0).
+	var beat_world := _lb_top_score > 0 and final_score > _lb_top_score
+	var beat_personal := final_score > _best_score
+	if beat_personal:
 		_best_score = final_score
 		_save_best()
 		_refresh_best_panel()
@@ -1646,19 +1623,111 @@ func _end_round() -> void:
 	# Celebrate above the button: volumetric score + fireworks + fanfare.
 	var burst_at := _start_button.global_position + Vector3(0, 0.18, 0)
 	BigScorePopup3D.spawn(self, burst_at, str(final_score))
-	_spawn_burst(burst_at, Color(0.30, 1.0, 0.55))
-	_push_score_fanfare()
+	if beat_world:
+		_celebrate_high_score(2)
+	elif beat_personal and _best_score > 0:
+		_celebrate_high_score(1)
+	else:
+		_spawn_burst(burst_at, Color(0.30, 1.0, 0.55))
+		_push_score_fanfare()
 	_submit_score(final_score)
 	_start_cooldown = 2.5
 	_refresh_button_label()
 
+# Big scene-spanning celebration for a new high score. tier 1 = personal best (warm/gold
+# bursts + a crowd cheer); tier 2 = beat the WORLD leaderboard top (bigger, distinct cyan/
+# magenta bursts, more of them, a longer/brighter cheer). Multiple bursts are scattered
+# across the whole play volume around the player rather than one burst at the goal, so the
+# room fills with fireworks. Respects _muted via the audio helpers.
+func _celebrate_high_score(tier: int) -> void:
+	var cam := get_viewport().get_camera_3d()
+	var center := Vector3(0.0, 1.5, -0.6)
+	if cam != null:
+		center = cam.global_position + cam.global_transform.basis.z * -0.6   # ~0.6 m in front
+	# tier 2 (world record) is bigger: more bursts, wider spread, cooler palette.
+	var n_bursts := 9 if tier >= 2 else 6
+	var spread := 1.7 if tier >= 2 else 1.3
+	# Two distinct palettes so personal-best (warm/gold) vs world-record (electric cyan/
+	# magenta) read as clearly different celebrations at a glance.
+	var warm: Array[Color] = [Color(1.0, 0.85, 0.25), Color(1.0, 0.55, 0.12), Color(1.0, 0.95, 0.55)]
+	var cool: Array[Color] = [Color(0.30, 0.90, 1.0), Color(1.0, 0.30, 0.95), Color(0.55, 0.70, 1.0)]
+	var palette := cool if tier >= 2 else warm
+	for i in range(n_bursts):
+		# Scatter bursts around the player in a rough sphere, biased forward + upward so
+		# they're in view. Stagger their timing so they pop in a cascade, not all at once.
+		var dir := Vector3(randf_range(-1.0, 1.0), randf_range(-0.2, 1.0), randf_range(-1.0, 0.3))
+		if dir.length() < 0.01:
+			dir = Vector3.UP
+		var at := center + dir.normalized() * randf_range(spread * 0.4, spread)
+		var col: Color = palette[i % palette.size()]
+		var delay := randf_range(0.0, 0.7 if tier >= 2 else 0.5)
+		get_tree().create_timer(delay).timeout.connect(func():
+			if is_instance_valid(self): _spawn_burst(at, col))
+	# One bigger boom-fanfare for the moment, then the crowd cheer swells over it.
+	_push_score_fanfare()
+	_push_cheer(tier >= 2)
+
+# Procedural crowd-cheer-ish swell: filtered white-noise (the "roar" of a crowd) that rises
+# then falls, layered with a bright sustained in-key chord (C minor pentatonic) so it sits in
+# the scene's musical world rather than clashing. `big` = the world-record cheer: longer,
+# louder, a fuller chord and a higher roar. Mixed into ONE shared-player buffer fill, so it
+# needs the shared 3D player's buffer to be long enough (~0.9 s); muting silences it.
+func _push_cheer(big: bool) -> void:
+	if _muted or _audio_playback == null:
+		return
+	# Recentre the (positional) shared player on the user so the cheer surrounds them.
+	var cam := get_viewport().get_camera_3d()
+	if _shared_audio != null and cam != null:
+		_shared_audio.position = cam.global_position
+	var dur := 0.95 if big else 0.7
+	var n := int(SAMPLE_RATE * dur)
+	var to_fill: int = min(n, _audio_playback.get_frames_available())
+	# In-key chord: a fuller, brighter set for the world-record cheer. Snapped to scale so
+	# it harmonises with the bed/chimes. (Roughly C-Eb-G-Bb-C / C-G triad.)
+	var chord: Array = []
+	if big:
+		for f in [261.63, 311.13, 392.0, 466.16, 523.25]:
+			chord.append(_snap_to_scale(f))
+	else:
+		for f in [261.63, 392.0, 523.25]:
+			chord.append(_snap_to_scale(f))
+	# Roar = band-passed noise: keep a running low-passed noise and high-pass it (subtract a
+	# slower average) so it reads as a breathy crowd hiss, not white static. Swells in, out.
+	var lp := 0.0
+	var lp2 := 0.0
+	var roar_gain := 0.34 if big else 0.26
+	for i in range(to_fill):
+		var t := float(i) / SAMPLE_RATE
+		var u := t / dur
+		# Swell envelope: quick rise, sustained, gentle fall (a crowd surging then settling).
+		var swell := pow(sin(PI * u), 0.6)
+		var white := randf() * 2.0 - 1.0
+		lp = lerp(lp, white, 0.20)        # ~3 kHz-ish low-pass
+		lp2 = lerp(lp2, lp, 0.012)        # slow average to subtract = high-pass the rumble out
+		var roar := (lp - lp2)
+		# A little amplitude flutter so the roar undulates like overlapping voices.
+		roar *= 0.7 + 0.3 * sin(TAU * (6.0 + 3.0 * sin(TAU * 0.7 * t)) * t)
+		var s := roar * roar_gain * swell
+		# Bright sustained chord on top — equal-power, soft attack so it blooms with the roar.
+		var chord_env := swell * (1.0 - exp(-8.0 * t))
+		var cs := 0.0
+		for f in chord:
+			cs += sin(TAU * float(f) * t) + 0.25 * sin(TAU * float(f) * 2.0 * t)
+		s += cs / float(maxi(1, chord.size())) * (0.22 if big else 0.18) * chord_env
+		# Sparkle shimmer for the world record only — a glittery high tremolo tail.
+		if big:
+			s += sin(TAU * 1568.0 * t) * exp(-2.2 * u) * 0.06 * (0.5 + 0.5 * sin(TAU * 11.0 * t))
+		_audio_playback.push_frame(Vector2(clampf(s, -1.0, 1.0), clampf(s, -1.0, 1.0)))
+
 func _refresh_button_label() -> void:
 	if _start_button_label == null:
 		return
+	# Compact label (the button is small on the grid; the BEST score is shown big on the
+	# panel header instead of being crammed in here).
 	if _timer_active:
 		_start_button_label.text = "%d\n%d pts" % [int(ceil(_timer_remaining)), _round_score]
 	else:
-		_start_button_label.text = "START\n30s  ·  Best: %d" % _best_score
+		_start_button_label.text = "START\n30s"
 
 # --- Real Persona-arm (upper-limb passthrough) toggle ----------------------
 # Distinct from the virtual GLTF hand mesh (middle-pinch). This pokable button
@@ -1683,38 +1752,7 @@ func _load_arms_pref() -> void:
 		for d in _hand_drivers:
 			d.set_shown(false)
 
-# Build the pokable ARMS button (mirror of START, on the left).
-func _build_arms_button() -> void:
-	_arms_button = Node3D.new()
-	_arms_button.name = "ArmsButton"
-	_arms_button.position = Vector3(-0.42, 1.20, -0.45)
-	add_child(_arms_button)
-
-	_arms_btn_face = Node3D.new()
-	_arms_button.add_child(_arms_btn_face)
-
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(0.17, 0.085, 0.03)
-	mi.mesh = bm
-	_arms_button_mat = StandardMaterial3D.new()
-	_arms_button_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	_arms_button_mat.emission_enabled = true
-	mi.material_override = _arms_button_mat
-	_arms_btn_face.add_child(mi)
-
-	_arms_button_label = Label3D.new()
-	_arms_button_label.font_size = 30
-	_arms_button_label.outline_size = 8
-	_arms_button_label.modulate = Color.WHITE
-	_arms_button_label.outline_modulate = Color(0, 0, 0, 0.9)
-	_arms_button_label.pixel_size = 0.0005
-	_arms_button_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_arms_button_label.position = Vector3(0, 0, 0.017)
-	_arms_btn_face.add_child(_arms_button_label)
-	_refresh_arms_label()
-
-# The ARMS button is now a HANDS-MODE selector: it switches between virtual MESH
+# The HANDS button is a HANDS-MODE selector: it switches between virtual MESH
 # hands and real Persona ARMS (two different things, mutually exclusive) rather than
 # just toggling real arms on/off. Label shows the mode you'll switch TO next.
 func _refresh_arms_label() -> void:
@@ -1733,37 +1771,6 @@ func _refresh_arms_label() -> void:
 		_arms_button_mat.emission = Color(0.95, 0.62, 0.20)
 		_arms_button_mat.emission_energy_multiplier = 1.0
 
-# Build the pokable MUTE button (mirror of ARMS, just below it on the left).
-func _build_mute_button() -> void:
-	_mute_button = Node3D.new()
-	_mute_button.name = "MuteButton"
-	_mute_button.position = Vector3(-0.42, 1.08, -0.45)
-	add_child(_mute_button)
-
-	_mute_btn_face = Node3D.new()
-	_mute_button.add_child(_mute_btn_face)
-
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(0.17, 0.085, 0.03)
-	mi.mesh = bm
-	_mute_button_mat = StandardMaterial3D.new()
-	_mute_button_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	_mute_button_mat.emission_enabled = true
-	mi.material_override = _mute_button_mat
-	_mute_btn_face.add_child(mi)
-
-	_mute_button_label = Label3D.new()
-	_mute_button_label.font_size = 30
-	_mute_button_label.outline_size = 8
-	_mute_button_label.modulate = Color.WHITE
-	_mute_button_label.outline_modulate = Color(0, 0, 0, 0.9)
-	_mute_button_label.pixel_size = 0.0005
-	_mute_button_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_mute_button_label.position = Vector3(0, 0, 0.017)
-	_mute_btn_face.add_child(_mute_button_label)
-	_refresh_mute_label()
-
 func _refresh_mute_label() -> void:
 	if _mute_button_label == null or _mute_button_mat == null:
 		return
@@ -1778,67 +1785,31 @@ func _refresh_mute_label() -> void:
 		_mute_button_mat.emission = Color(0.30, 0.95, 0.70)
 		_mute_button_mat.emission_energy_multiplier = 1.2
 
-# Watch for a finger poke on the MUTE button; toggle sound on/off.
-func _update_mute_button(delta: float) -> void:
-	_mute_cooldown = max(0.0, _mute_cooldown - delta)
-	if _mute_cooldown > 0.0 or _mute_button == null:
-		return
-	for side in ["left_hand", "right_hand"]:
-		var tip = _index_tip_world(side)
-		if tip != null and (tip as Vector3).distance_to(_mute_button.global_position) <= 0.08:
-			_toggle_mute()
-			return
-
+# Toggle sound on/off. Wired as the MUTE poke-button's callback (registry handles the
+# poke detection + depress); also still callable directly.
 func _toggle_mute() -> void:
 	_muted = not _muted
-	_mute_cooldown = 0.8
 	# Single mute point: drop the shared player to silence (cheaper + total than
 	# gating every synth path). volume restored on unmute.
 	if _shared_audio != null:
 		_shared_audio.volume_db = -80.0 if _muted else -3.0
 	if _bed_audio != null:
 		_bed_audio.volume_db = -80.0 if _muted else -10.0
-	# Depress animation (reuse the press feedback pattern).
-	if _mute_btn_face != null:
-		var tw := create_tween()
-		tw.tween_property(_mute_btn_face, "position", Vector3(0, 0, -0.012), 0.06)
-		tw.tween_property(_mute_btn_face, "position", Vector3.ZERO, 0.12)
 	_refresh_mute_label()
 	# A confirming blip plays only when turning sound back ON (volume already restored).
 	if not _muted:
 		_push_chime(660.0, 0.10, true)
-
-# Watch for a finger poke on the ARMS button; toggle the real-limb preference.
-func _update_arms_button(delta: float) -> void:
-	_arms_cooldown = max(0.0, _arms_cooldown - delta)
-	if _arms_cooldown > 0.0 or _arms_button == null:
-		return
-	for side in ["left_hand", "right_hand"]:
-		var tip = _index_tip_world(side)
-		if tip != null and (tip as Vector3).distance_to(_arms_button.global_position) <= 0.08:
-			_cycle_hands_mode()
-			return
-	# Also: poke one hand's fingertip onto the OTHER wrist to switch modes (experimental).
-	for side in ["left_hand", "right_hand"]:
-		var other := "right_hand" if side == "left_hand" else "left_hand"
-		var tip = _index_tip_world(side)
-		var wrist = _wrist_world(other)
-		if tip != null and wrist != null and (tip as Vector3).distance_to(wrist as Vector3) <= 0.06:
-			_cycle_hands_mode()
-			return
 
 # Switch between the two mutually-exclusive hand visualisations: virtual MESH hands
 # (hand_mesh_driver) and real Persona ARMS (the engine's upper-limb passthrough). One
 # is always on, the other off — turning on mesh hands and turning on real arms are
 # genuinely DIFFERENT things, so this is a mode toggle, not an on/off.
 func _cycle_hands_mode() -> void:
-	_arms_cooldown = 0.8
 	_real_arms_visible = not _real_arms_visible
 	_hand_mesh_visible = not _real_arms_visible   # exactly one mode active
 	for d in _hand_drivers:
 		d.set_shown(_hand_mesh_visible)
 	_write_arms_pref()
-	_press_arms_button()
 	_refresh_arms_label()
 	# Ascending sweep = switching to real arms, descending = switching to mesh hands.
 	_push_sweep(300.0, 900.0, 0.22) if _real_arms_visible else _push_sweep(900.0, 300.0, 0.22)
@@ -1851,21 +1822,13 @@ func _write_arms_pref() -> void:
 		f.store_string("visible" if _real_arms_visible else "hidden")
 		f.close()
 
-func _press_arms_button() -> void:
-	_push_click()
-	if _arms_btn_face != null:
-		var tw := create_tween()
-		tw.tween_property(_arms_btn_face, "position:z", -0.018, 0.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		tw.tween_property(_arms_btn_face, "position:z", 0.0, 0.11).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-
-# --- Gesture button panel ---------------------------------------------------
-# A grabbable panel (NO destruct button) next to the ARMS/MUTE column. One poke
-# button per non-index pinch gesture so they're discoverable + usable even with
-# gestures disabled, plus a "Gestures" master toggle and a big BEST readout (#3).
+# --- Unified control panel --------------------------------------------------
+# ONE grabbable panel holds all six buttons (NO destruct button). Each poke button is
+# discoverable + usable even with pinch gestures disabled.
 
 # Build one poke button as a child of `parent`, register it in _poke_buttons with a
-# callback. Matches the START/ARMS/MUTE styling: BoxMesh face + Label3D, depress
-# animation + cooldown handled centrally by _update_poke_buttons.
+# callback. BoxMesh face + Label3D, depress animation + cooldown handled centrally by
+# _update_poke_buttons.
 func _add_poke_button(parent: Node3D, local_pos: Vector3, text: String,
 		base: Color, emis: Color, cb: Callable) -> Dictionary:
 	var btn := Node3D.new()
@@ -1899,13 +1862,19 @@ func _add_poke_button(parent: Node3D, local_pos: Vector3, text: String,
 	_poke_buttons.append(entry)
 	return entry
 
-# Grabbable panel near the ARMS/MUTE buttons: BEST header + a poke button for each
-# non-index gesture + a master Gestures on/off toggle. Index-pinch grab still works
-# everywhere; these buttons work even when gesture recognition is disabled.
-func _build_gesture_panel() -> void:
+# ONE grabbable control panel holding ALL six buttons in a 2-column × 3-row grid,
+# plus a big BEST readout up top. Replaces the old scattered layout (separate START
+# near the world handle + an ARMS/MUTE column + a gesture panel). Each button reuses
+# the shared poke-button registry (_poke_buttons / _update_poke_buttons), so poke
+# detection uses world positions and keeps working after the panel is grabbed/moved.
+# No destruct button on this panel (per request). Buttons, L→R / top→bottom:
+#   row0: HANDS (mesh↔real cycle) | START (30s round)
+#   row1: MUTE (sound)            | GESTURES (master toggle)
+#   row2: SKY (immersion)         | RESET (everything)
+func _build_control_panel() -> void:
 	var root := PickupAbleBody3D.new()
-	root.name = "GesturePanel"
-	root.position = Vector3(-0.66, 1.16, -0.45)   # left of the ARMS/MUTE column, reachable
+	root.name = "ControlPanel"
+	root.position = Vector3(-0.5, 1.30, -0.5)   # left of centre, reachable
 	root.collision_layer = LAYER_GRAB_ONLY
 	root.collision_mask = 0
 	root.freeze = true
@@ -1914,8 +1883,8 @@ func _build_gesture_panel() -> void:
 	add_child(root)
 	_gesture_panel = root
 
-	var size_x := 0.26
-	var size_y := 0.54
+	var size_x := 0.50
+	var size_y := 0.52
 
 	var accent_mat := StandardMaterial3D.new()
 	accent_mat.albedo_color = Color(0.55, 0.45, 1.0, 0.30)
@@ -1943,27 +1912,45 @@ func _build_gesture_panel() -> void:
 	bg.position = Vector3(0, 0, -0.003)
 	root.add_child(bg)
 
-	# Fancy BEST readout (#3 — also surfaced here, bigger than the START label).
+	# Fancy BEST readout up top, spanning the width (bigger/fancier than a button label).
 	var best_title := _panel_label("★ BEST ★", 26, Color(1.0, 0.85, 0.30, 1.0), 7)
-	best_title.position = Vector3(0, size_y * 0.5 - 0.045, 0.004)
+	best_title.position = Vector3(0, size_y * 0.5 - 0.042, 0.004)
 	root.add_child(best_title)
-	_best_panel_label = _panel_label(str(_best_score), 48, Color(1.0, 0.95, 0.55, 1.0), 9)
-	_best_panel_label.position = Vector3(0, size_y * 0.5 - 0.105, 0.004)
+	_best_panel_label = _panel_label(str(_best_score), 54, Color(1.0, 0.95, 0.55, 1.0), 10)
+	_best_panel_label.position = Vector3(0, size_y * 0.5 - 0.108, 0.004)
 	root.add_child(_best_panel_label)
 
-	# Gesture buttons (poke). Stacked; spacing 0.10 with a 0.045 poke radius so a
-	# fingertip can't cross-trigger the neighbour. Each mirrors a pinch gesture.
-	var bx := 0.0
-	_add_poke_button(root, Vector3(bx, 0.085, 0.012), "HANDS\nshow / hide",
-		Color(0.14, 0.30, 0.20), Color(0.30, 0.90, 0.55), _gp_toggle_hands)
-	_add_poke_button(root, Vector3(bx, -0.020, 0.012), "RESET",
-		Color(0.30, 0.22, 0.10), Color(0.95, 0.62, 0.20), _reset_sandbox)
-	_add_poke_button(root, Vector3(bx, -0.125, 0.012), "SKY",
-		Color(0.12, 0.20, 0.42), Color(0.35, 0.55, 1.0), _toggle_immersion)
-	var ge := _add_poke_button(root, Vector3(bx, -0.230, 0.012), "GESTURES\nON",
+	# 2-column grid. col_x ±0.115 keeps a fingertip (0.045 poke radius) from crossing to
+	# the neighbour column; row spacing 0.105 likewise. Buttons begin below the BEST block.
+	var col_x := 0.115
+	var row_y: Array[float] = [-0.045, -0.150, -0.255]
+
+	# row0: HANDS | START
+	var hands_e := _add_poke_button(root, Vector3(-col_x, row_y[0], 0.012), "HANDS\nMESH",
+		Color(0.30, 0.22, 0.10), Color(0.95, 0.62, 0.20), _cycle_hands_mode)
+	var start_e := _add_poke_button(root, Vector3(col_x, row_y[0], 0.012), "START\n30s",
+		Color(0.10, 0.42, 0.24), Color(0.20, 0.95, 0.45), _gp_start)
+	# row1: MUTE | GESTURES
+	var mute_e := _add_poke_button(root, Vector3(-col_x, row_y[1], 0.012), "SOUND\nON",
+		Color(0.12, 0.34, 0.30), Color(0.30, 0.95, 0.70), _toggle_mute)
+	var gest_e := _add_poke_button(root, Vector3(col_x, row_y[1], 0.012), "GESTURES\nON",
 		Color(0.12, 0.34, 0.30), Color(0.30, 0.95, 0.70), _gp_toggle_gestures)
-	_gestures_toggle_label = ge["label"]
-	_gestures_toggle_mat = ge["mat"]
+	# row2: SKY | RESET
+	_add_poke_button(root, Vector3(-col_x, row_y[2], 0.012), "SKY",
+		Color(0.12, 0.20, 0.42), Color(0.35, 0.55, 1.0), _toggle_immersion)
+	_add_poke_button(root, Vector3(col_x, row_y[2], 0.012), "RESET",
+		Color(0.30, 0.22, 0.10), Color(0.95, 0.62, 0.20), _reset_sandbox)
+
+	# Repoint the existing per-button handles at these registry buttons so the bespoke
+	# per-frame logic (timer countdown/pulse, label refreshers) keeps working unchanged.
+	_start_button = start_e["node"]
+	_start_button_label = start_e["label"]; _start_button_mat = start_e["mat"]
+	_arms_button_label = hands_e["label"]; _arms_button_mat = hands_e["mat"]
+	_mute_button_label = mute_e["label"]; _mute_button_mat = mute_e["mat"]
+	_gestures_toggle_label = gest_e["label"]; _gestures_toggle_mat = gest_e["mat"]
+	_refresh_button_label()
+	_refresh_arms_label()
+	_refresh_mute_label()
 
 	var cs := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -1973,12 +1960,18 @@ func _build_gesture_panel() -> void:
 	_register_grabbable(root)
 	# Deliberately NO destruct button on this panel (per request).
 
-# Panel "HANDS" button — same as the middle-pinch gesture: show/hide the mesh hands.
-func _gp_toggle_hands() -> void:
-	_hand_mesh_visible = not _hand_mesh_visible
-	for d in _hand_drivers:
-		d.set_shown(_hand_mesh_visible)
-	_push_sweep(300.0, 900.0, 0.22) if _hand_mesh_visible else _push_sweep(900.0, 300.0, 0.22)
+# START button callback: begin a round when idle, cancel to neutral when one is running
+# (a SECOND press restarts). Mirrors the old _update_timer poke behaviour, now driven by
+# the shared poke registry. The countdown label + red urgency pulse still tick in _update_timer.
+func _gp_start() -> void:
+	# Respect the post-round / post-cancel settle window so a lingering finger can't
+	# instantly restart (the registry's own 0.6 s cooldown is shorter than this).
+	if _start_cooldown > 0.0:
+		return
+	if _timer_active:
+		_cancel_round()
+	else:
+		_start_round()
 
 # Panel "Gestures" button — master switch for middle/ring/pinky pinch recognition.
 func _gp_toggle_gestures() -> void:
@@ -2126,7 +2119,12 @@ func _on_lb_completed(_result: int, code: int, _headers: PackedStringArray, body
 		var nm := str(s.get("name", "AAA"))
 		if nm.length() > 8:
 			nm = nm.substr(0, 8)
-		lines.append("%2d  %-8s %5d" % [i, nm, int(s.get("score", 0))])
+		var sc := int(s.get("score", 0))
+		# Row 1 is the highest (Apps Script returns sorted desc) — remember it so round
+		# end can tell a world-record from a merely-personal best.
+		if i == 1:
+			_lb_top_score = sc
+		lines.append("%2d  %-8s %5d" % [i, nm, sc])
 		i += 1
 	_lb_rows_label.text = "\n".join(lines)
 
