@@ -96,6 +96,12 @@ var _filt_basis : Basis = Basis.IDENTITY
 var _filt_vel : Vector3 = Vector3.ZERO      # filtered linear speed (m/s)
 var _filt_avel : float = 0.0                # filtered angular speed (rad/s)
 var _grab_rot_offset : Basis = Basis.IDENTITY   # held body's basis relative to the holder, at grab
+# The body CENTRE (origin) expressed in the HOLDER's local frame at grab time. Driving the
+# follow with this offset (instead of the bare holder origin) keeps the GRABBED POINT under
+# the finger and makes the object rotate ABOUT that point, not snap its centre to the hand.
+# Without it, grabbing a wide panel by its edge teleported the panel centre onto your fingertip
+# (so you'd then poke a button you didn't mean to). Captured in pick_up, applied in _process.
+var _grab_pos_offset : Vector3 = Vector3.ZERO
 var _grab_scale : Vector3 = Vector3.ONE
 
 
@@ -148,7 +154,12 @@ func _process(delta: float) -> void:
 		return
 
 	var holder_xform := holder.global_transform
-	var target_pos := holder_xform.origin
+	# Drive the body so the GRAB POINT (not the centre) stays under the finger. _grab_pos_offset
+	# is the body centre in holder-local space at grab; mapping it back through the (possibly
+	# rotated) holder frame each frame gives the centre position that keeps the grabbed point put
+	# and lets the object orbit about that point. Use orthonormalized basis so a uniformly-scaled
+	# holder doesn't smear the offset.
+	var target_pos := holder_xform.origin + holder_xform.basis.orthonormalized() * _grab_pos_offset
 	var target_basis := (holder_xform.basis.orthonormalized() * _grab_rot_offset).orthonormalized()
 
 	if not _follow_ready or delta <= 0.0:
@@ -242,8 +253,13 @@ func pick_up(pick_up_by) -> void:
 	var holder := pick_up_by as Node3D
 	if holder != null:
 		_grab_rot_offset = holder.global_transform.basis.orthonormalized().inverse() * current_transform.basis.orthonormalized()
+		# Body centre expressed in the holder's local frame at grab. Replaying this offset in
+		# _process keeps the grabbed point (e.g. the edge you pinched) under the finger instead
+		# of forcing the centre to the hand. affine_inverse handles any holder translation/rotation.
+		_grab_pos_offset = holder.global_transform.affine_inverse() * current_transform.origin
 	else:
 		_grab_rot_offset = Basis.IDENTITY
+		_grab_pos_offset = Vector3.ZERO
 	_grab_scale = current_transform.basis.get_scale()
 	_follow_ready = false   # seed the filter from the current pose on the first frame
 
