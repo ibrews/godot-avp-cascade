@@ -25,7 +25,7 @@ Hand tracking is an **engine capability, not a project setting** — no amount o
 
 Experimental WIP. Rendering rides on Apple's official visionOS contribution — [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot)'s `apple/visionos-xr` branch (PR open, not yet merged upstream; Ricardo Sanchez-Saez, Apple visionOS team, is lead author — see the [PR thread](https://github.com/godotengine/godot/pull/109975)). **Hand tracking** rides on [Clancey's fork](https://github.com/Clancey/godot/tree/visionos_master_pr), which rebases hand-interaction support on top — see [Which Godot engine you need](#️-which-godot-engine-you-need-read-this-first) above.
 
-Verified working **2026-05-28** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26.
+Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26.
 
 - 90 FPS locked, **zero variance across a 95-second sample** (19 × 5-second windows)
 - ~475 physics collisions / 95s
@@ -138,6 +138,7 @@ The engine source tree is `.gitignore`'d here (regenerable from the fork above).
 ## Known limitations
 
 - **Mobile renderer only.** Forward+ doesn't render on this path. No Lumen/Nanite-equivalent quality.
+- **Near plane set to 0.1 m (AVP minimum).** Objects render right up to ~10 cm from your face. Increase `XRCamera3D.near` in `main_v2.tscn` if you see z-fighting at close range.
 - **Manual app launch on the headset.** `xcrun devicectl device process launch` returns `connection invalidated` for immersive-space apps. The user has to tap the icon.
 - **MSAA does not work on this branch yet.** Blocked on Godot PR [#78598](https://github.com/godotengine/godot/pull/78598). Don't enable it. (It's *not* needed for clean passthrough edges — see the depth-bias fix below.)
 - **Hand-as-collision-mesh not yet implemented.** The hand can grab and throw but does not act as a physics collider for passive deflection.

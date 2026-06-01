@@ -43,7 +43,7 @@ environment = SubResource("Environment_1")
 current = true
 
 [node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
-near = 0.15
+near = 0.1
 
 [node name="AudioListener3D" type="AudioListener3D" parent="XROrigin3D/XRCamera3D"]
 

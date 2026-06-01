@@ -105,7 +105,7 @@ environment = SubResource("Environment_1")
 current = true
 
 [node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
-near = 0.15
+near = 0.1
 
 [node name="Cube_HUD" type="MeshInstance3D" parent="XROrigin3D/XRCamera3D"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.6)
