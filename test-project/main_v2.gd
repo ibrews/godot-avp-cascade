@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.6.3-scalefix"  # FIX: object-scale spike rejection + smoothing (jitter was amplified by scale factor)
+const APP_VERSION := "v0.7.0-music"  # 30s music bed (scale-snapped), textured dissolve sound, gesture panel + hands-mode cycle, Best polish
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -83,6 +83,17 @@ var _collision_count := 0
 var _hand_drivers: Array = []
 var _hand_mesh_visible := true
 var _gesture_cooldown := 0.0
+# Master switch for the pinch GESTURES (middle=hands, ring=reset, pinky=sky). When a
+# user keeps triggering them by accident they can turn recognition off via the gesture
+# panel's "Gestures" button. Index-pinch grab is NEVER gated by this.
+var _gestures_enabled := true
+# Generic poke-button registry for the gesture panel: each entry
+# {node, face, mat, label, cb (Callable), cooldown}. _update_poke_buttons drives them.
+var _poke_buttons: Array = []
+var _gesture_panel: Node3D
+var _gestures_toggle_label: Label3D
+var _gestures_toggle_mat: StandardMaterial3D
+var _best_panel_label: Label3D   # bigger "BEST" readout on the gesture panel
 # Grab-stutter diagnostics: count physics vs render frames to confirm the 90 Hz
 # display / 60 Hz physics beat, and log held/pause/double-grab state per window.
 var _phys_frame_count := 0
@@ -263,6 +274,7 @@ func _ready():
 	_load_arms_pref()
 	_build_arms_button()
 	_build_mute_button()
+	_build_gesture_panel()
 	_build_leaderboard_panel()
 	_build_instructions_panel()
 	_fetch_leaderboard()
@@ -715,6 +727,10 @@ func _process(delta: float):
 			if not _hand_confident(side):
 				continue
 			var pinched := _which_finger_pinch(side)  # -1, or 15/20/25
+			# Master switch: when gestures are disabled (panel toggle), middle/ring/
+			# pinky no-op. Index-pinch grab is unaffected (it's not in this block).
+			if not _gestures_enabled:
+				continue
 			if pinched == 20:        # ring → reset
 				_reset_sandbox()
 				_gesture_cooldown = 1.0
@@ -737,6 +753,7 @@ func _process(delta: float):
 	_update_music_bed(delta)
 	_update_arms_button(delta)
 	_update_mute_button(delta)
+	_update_poke_buttons(delta)
 	_update_leaderboard(delta)
 	_update_destruct(delta)
 	_update_grab_sound()
@@ -1624,6 +1641,7 @@ func _end_round() -> void:
 	if final_score > _best_score:
 		_best_score = final_score
 		_save_best()
+		_refresh_best_panel()
 	_start_button_mat.emission = Color(0.20, 0.95, 0.45)
 	# Celebrate above the button: volumetric score + fireworks + fanfare.
 	var burst_at := _start_button.global_position + Vector3(0, 0.18, 0)
@@ -1640,7 +1658,7 @@ func _refresh_button_label() -> void:
 	if _timer_active:
 		_start_button_label.text = "%d\n%d pts" % [int(ceil(_timer_remaining)), _round_score]
 	else:
-		_start_button_label.text = "START\n30s  ·  best %d" % _best_score
+		_start_button_label.text = "START\n30s  ·  Best: %d" % _best_score
 
 # --- Real Persona-arm (upper-limb passthrough) toggle ----------------------
 # Distinct from the virtual GLTF hand mesh (middle-pinch). This pokable button
@@ -1658,6 +1676,12 @@ func _load_arms_pref() -> void:
 	var v := f.get_as_text().strip_edges().to_lower()
 	f.close()
 	_real_arms_visible = (v == "visible")
+	# MESH hands and REAL arms are mutually exclusive modes — if a prior session left
+	# real arms on, start with the virtual mesh hidden so the two never overlap.
+	if _real_arms_visible:
+		_hand_mesh_visible = false
+		for d in _hand_drivers:
+			d.set_shown(false)
 
 # Build the pokable ARMS button (mirror of START, on the left).
 func _build_arms_button() -> void:
@@ -1690,16 +1714,21 @@ func _build_arms_button() -> void:
 	_arms_btn_face.add_child(_arms_button_label)
 	_refresh_arms_label()
 
+# The ARMS button is now a HANDS-MODE selector: it switches between virtual MESH
+# hands and real Persona ARMS (two different things, mutually exclusive) rather than
+# just toggling real arms on/off. Label shows the mode you'll switch TO next.
 func _refresh_arms_label() -> void:
 	if _arms_button_label == null or _arms_button_mat == null:
 		return
 	if _real_arms_visible:
-		_arms_button_label.text = "REAL ARMS\nON"
+		# Currently REAL arms → blue. Tapping switches to MESH.
+		_arms_button_label.text = "HANDS\nREAL ARMS"
 		_arms_button_mat.albedo_color = Color(0.12, 0.34, 0.50)
 		_arms_button_mat.emission = Color(0.30, 0.75, 1.0)
 		_arms_button_mat.emission_energy_multiplier = 1.2
 	else:
-		_arms_button_label.text = "REAL ARMS\nOFF"
+		# Currently MESH hands → warm. Tapping switches to REAL arms.
+		_arms_button_label.text = "HANDS\nMESH"
 		_arms_button_mat.albedo_color = Color(0.30, 0.22, 0.10)
 		_arms_button_mat.emission = Color(0.95, 0.62, 0.20)
 		_arms_button_mat.emission_energy_multiplier = 1.0
@@ -1787,29 +1816,40 @@ func _update_arms_button(delta: float) -> void:
 	for side in ["left_hand", "right_hand"]:
 		var tip = _index_tip_world(side)
 		if tip != null and (tip as Vector3).distance_to(_arms_button.global_position) <= 0.08:
-			_toggle_real_arms()
+			_cycle_hands_mode()
 			return
-	# Also: poke one hand's fingertip onto the OTHER wrist to toggle (experimental).
+	# Also: poke one hand's fingertip onto the OTHER wrist to switch modes (experimental).
 	for side in ["left_hand", "right_hand"]:
 		var other := "right_hand" if side == "left_hand" else "left_hand"
 		var tip = _index_tip_world(side)
 		var wrist = _wrist_world(other)
 		if tip != null and wrist != null and (tip as Vector3).distance_to(wrist as Vector3) <= 0.06:
-			_toggle_real_arms()
+			_cycle_hands_mode()
 			return
 
-func _toggle_real_arms() -> void:
-	_real_arms_visible = not _real_arms_visible
+# Switch between the two mutually-exclusive hand visualisations: virtual MESH hands
+# (hand_mesh_driver) and real Persona ARMS (the engine's upper-limb passthrough). One
+# is always on, the other off — turning on mesh hands and turning on real arms are
+# genuinely DIFFERENT things, so this is a mode toggle, not an on/off.
+func _cycle_hands_mode() -> void:
 	_arms_cooldown = 0.8
-	# user://upper_limb.txt maps to Documents/upper_limb.txt; the engine reads it.
+	_real_arms_visible = not _real_arms_visible
+	_hand_mesh_visible = not _real_arms_visible   # exactly one mode active
+	for d in _hand_drivers:
+		d.set_shown(_hand_mesh_visible)
+	_write_arms_pref()
+	_press_arms_button()
+	_refresh_arms_label()
+	# Ascending sweep = switching to real arms, descending = switching to mesh hands.
+	_push_sweep(300.0, 900.0, 0.22) if _real_arms_visible else _push_sweep(900.0, 300.0, 0.22)
+
+# Persist the real-arm preference; user://upper_limb.txt maps to Documents/upper_limb.txt,
+# which the recompiled engine polls (~0.5s) and applies to SwiftUI .upperLimbVisibility.
+func _write_arms_pref() -> void:
 	var f := FileAccess.open("user://upper_limb.txt", FileAccess.WRITE)
 	if f != null:
 		f.store_string("visible" if _real_arms_visible else "hidden")
 		f.close()
-	_press_arms_button()
-	_refresh_arms_label()
-	# Ascending sweep = arms appearing, descending = arms hiding.
-	_push_sweep(300.0, 900.0, 0.22) if _real_arms_visible else _push_sweep(900.0, 300.0, 0.22)
 
 func _press_arms_button() -> void:
 	_push_click()
@@ -1817,6 +1857,175 @@ func _press_arms_button() -> void:
 		var tw := create_tween()
 		tw.tween_property(_arms_btn_face, "position:z", -0.018, 0.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		tw.tween_property(_arms_btn_face, "position:z", 0.0, 0.11).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+# --- Gesture button panel ---------------------------------------------------
+# A grabbable panel (NO destruct button) next to the ARMS/MUTE column. One poke
+# button per non-index pinch gesture so they're discoverable + usable even with
+# gestures disabled, plus a "Gestures" master toggle and a big BEST readout (#3).
+
+# Build one poke button as a child of `parent`, register it in _poke_buttons with a
+# callback. Matches the START/ARMS/MUTE styling: BoxMesh face + Label3D, depress
+# animation + cooldown handled centrally by _update_poke_buttons.
+func _add_poke_button(parent: Node3D, local_pos: Vector3, text: String,
+		base: Color, emis: Color, cb: Callable) -> Dictionary:
+	var btn := Node3D.new()
+	btn.position = local_pos
+	parent.add_child(btn)
+	var face := Node3D.new()
+	btn.add_child(face)
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.20, 0.075, 0.025)
+	mi.mesh = bm
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	mat.albedo_color = base
+	mat.emission_enabled = true
+	mat.emission = emis
+	mat.emission_energy_multiplier = 1.1
+	mi.material_override = mat
+	face.add_child(mi)
+	var lbl := Label3D.new()
+	lbl.font_size = 22
+	lbl.outline_size = 6
+	lbl.modulate = Color.WHITE
+	lbl.outline_modulate = Color(0, 0, 0, 0.9)
+	lbl.pixel_size = 0.0005
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.text = text
+	lbl.position = Vector3(0, 0, 0.015)
+	face.add_child(lbl)
+	var entry := {"node": btn, "face": face, "mat": mat, "label": lbl, "cb": cb, "cooldown": 0.0}
+	_poke_buttons.append(entry)
+	return entry
+
+# Grabbable panel near the ARMS/MUTE buttons: BEST header + a poke button for each
+# non-index gesture + a master Gestures on/off toggle. Index-pinch grab still works
+# everywhere; these buttons work even when gesture recognition is disabled.
+func _build_gesture_panel() -> void:
+	var root := PickupAbleBody3D.new()
+	root.name = "GesturePanel"
+	root.position = Vector3(-0.66, 1.16, -0.45)   # left of the ARMS/MUTE column, reachable
+	root.collision_layer = LAYER_GRAB_ONLY
+	root.collision_mask = 0
+	root.freeze = true
+	root.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	root.freeze_on_release = true
+	add_child(root)
+	_gesture_panel = root
+
+	var size_x := 0.26
+	var size_y := 0.54
+
+	var accent_mat := StandardMaterial3D.new()
+	accent_mat.albedo_color = Color(0.55, 0.45, 1.0, 0.30)
+	accent_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	accent_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	accent_mat.emission_enabled = true
+	accent_mat.emission = Color(0.55, 0.45, 1.0)
+	var accent := MeshInstance3D.new()
+	var aq := QuadMesh.new()
+	aq.size = Vector2(size_x + 0.016, size_y + 0.016)
+	accent.mesh = aq
+	accent.material_override = accent_mat
+	accent.position = Vector3(0, 0, -0.006)
+	root.add_child(accent)
+
+	var bg := MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(size_x, size_y)
+	bg.mesh = quad
+	var bgmat := StandardMaterial3D.new()
+	bgmat.albedo_color = Color(0.03, 0.03, 0.05, 0.85)
+	bgmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bgmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg.material_override = bgmat
+	bg.position = Vector3(0, 0, -0.003)
+	root.add_child(bg)
+
+	# Fancy BEST readout (#3 — also surfaced here, bigger than the START label).
+	var best_title := _panel_label("★ BEST ★", 26, Color(1.0, 0.85, 0.30, 1.0), 7)
+	best_title.position = Vector3(0, size_y * 0.5 - 0.045, 0.004)
+	root.add_child(best_title)
+	_best_panel_label = _panel_label(str(_best_score), 48, Color(1.0, 0.95, 0.55, 1.0), 9)
+	_best_panel_label.position = Vector3(0, size_y * 0.5 - 0.105, 0.004)
+	root.add_child(_best_panel_label)
+
+	# Gesture buttons (poke). Stacked; spacing 0.10 with a 0.045 poke radius so a
+	# fingertip can't cross-trigger the neighbour. Each mirrors a pinch gesture.
+	var bx := 0.0
+	_add_poke_button(root, Vector3(bx, 0.085, 0.012), "HANDS\nshow / hide",
+		Color(0.14, 0.30, 0.20), Color(0.30, 0.90, 0.55), _gp_toggle_hands)
+	_add_poke_button(root, Vector3(bx, -0.020, 0.012), "RESET",
+		Color(0.30, 0.22, 0.10), Color(0.95, 0.62, 0.20), _reset_sandbox)
+	_add_poke_button(root, Vector3(bx, -0.125, 0.012), "SKY",
+		Color(0.12, 0.20, 0.42), Color(0.35, 0.55, 1.0), _toggle_immersion)
+	var ge := _add_poke_button(root, Vector3(bx, -0.230, 0.012), "GESTURES\nON",
+		Color(0.12, 0.34, 0.30), Color(0.30, 0.95, 0.70), _gp_toggle_gestures)
+	_gestures_toggle_label = ge["label"]
+	_gestures_toggle_mat = ge["mat"]
+
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(size_x, size_y, 0.04)
+	cs.shape = box
+	root.add_child(cs)
+	_register_grabbable(root)
+	# Deliberately NO destruct button on this panel (per request).
+
+# Panel "HANDS" button — same as the middle-pinch gesture: show/hide the mesh hands.
+func _gp_toggle_hands() -> void:
+	_hand_mesh_visible = not _hand_mesh_visible
+	for d in _hand_drivers:
+		d.set_shown(_hand_mesh_visible)
+	_push_sweep(300.0, 900.0, 0.22) if _hand_mesh_visible else _push_sweep(900.0, 300.0, 0.22)
+
+# Panel "Gestures" button — master switch for middle/ring/pinky pinch recognition.
+func _gp_toggle_gestures() -> void:
+	_gestures_enabled = not _gestures_enabled
+	if _gestures_toggle_label != null:
+		_gestures_toggle_label.text = "GESTURES\nON" if _gestures_enabled else "GESTURES\nOFF"
+	if _gestures_toggle_mat != null:
+		if _gestures_enabled:
+			_gestures_toggle_mat.albedo_color = Color(0.12, 0.34, 0.30)
+			_gestures_toggle_mat.emission = Color(0.30, 0.95, 0.70)
+		else:
+			_gestures_toggle_mat.albedo_color = Color(0.32, 0.12, 0.12)
+			_gestures_toggle_mat.emission = Color(0.95, 0.30, 0.30)
+	_push_sweep(300.0, 900.0, 0.18) if _gestures_enabled else _push_sweep(900.0, 300.0, 0.18)
+
+# Update the bigger BEST readout on the gesture panel (call after a new best is saved).
+func _refresh_best_panel() -> void:
+	if _best_panel_label != null:
+		_best_panel_label.text = str(_best_score)
+
+# Drive every registered poke button: cooldown tick, fingertip-distance test, then
+# depress + click + callback. Used by the gesture panel (START/ARMS/MUTE stay bespoke).
+func _update_poke_buttons(delta: float) -> void:
+	for e in _poke_buttons:
+		e["cooldown"] = maxf(0.0, float(e["cooldown"]) - delta)
+	for e in _poke_buttons:
+		if float(e["cooldown"]) > 0.0:
+			continue
+		var btn: Node3D = e["node"]
+		if not is_instance_valid(btn) or not btn.visible:
+			continue
+		for side in ["left_hand", "right_hand"]:
+			var tip = _index_tip_world(side)
+			if tip != null and (tip as Vector3).distance_to(btn.global_position) <= 0.045:
+				e["cooldown"] = 0.6
+				_depress(e["face"])
+				_push_click()
+				(e["cb"] as Callable).call()
+				break
+
+# Shared depress animation for poke buttons (the face dips in Z, then springs back).
+func _depress(face: Node3D) -> void:
+	if face == null:
+		return
+	var tw := create_tween()
+	tw.tween_property(face, "position:z", -0.014, 0.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(face, "position:z", 0.0, 0.11).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 # Fire-and-forget GET submit (survives Apps Script's POST→GET redirect).
 func _submit_score(score: int) -> void:
@@ -1987,7 +2196,7 @@ func _build_instructions_panel() -> void:
 	root.add_child(goal)
 
 	var controls := _panel_label(
-		"index pinch     grab & move\nBOTH hands      scale + rotate\nmiddle pinch    show / hide hands\nring pinch      reset everything\npinky pinch     immersive sky\npoke START      30s time attack\npoke WRIST      real arms on / off\npoke MUTE       sound on / off\ngrab the bar    move / scale world",
+		"index pinch     grab & move\nBOTH hands      scale + rotate\nmiddle pinch    show / hide hands\nring pinch      reset everything\npinky pinch     immersive sky\npoke START      30s time attack\npoke HANDS      mesh / real arms\npoke MUTE       sound on / off\ngesture panel   buttons for all\ngrab the bar    move / scale world",
 		24, Color(0.62, 0.92, 1.0, 1.0), 6)
 	controls.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	controls.position = Vector3(0, -size_y * 0.5 + 0.18, 0.006)
