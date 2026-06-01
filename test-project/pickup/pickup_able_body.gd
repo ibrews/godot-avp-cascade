@@ -325,8 +325,22 @@ func _update_highlight() -> void:
 
 # Enter/exit external two-hand control: freeze so physics can't fight the driver,
 # DISABLE collision so the scaling/rotating body doesn't shove (and get shoved by)
-# other bodies — that contact was the jitter while transforming. Turn the outline
-# blue, and restore freeze + collision on exit.
+# other bodies, and — CRITICAL — FREEZE the holding hand handler's fingertip-follow
+# so that handler node can't drag this body.
+#
+# THE TWO-WRITER BUG (the "glitches to a couple of specific spots, worse when scaled
+# big" report): a held body is a CHILD of the hand handler (pick_up reparents it).
+# main's _update_two_hand_scale sets the body's global_transform first (tree root runs
+# first), then the holding handler's _process moves the handler NODE to the fingertip —
+# and the body, being its child, is carried by that motion AFTER the scale already
+# placed it. Holding still it's a steady offset; scaling big you move that hand fast,
+# so the handler's per-frame motion spikes and the body jumps to the dragged spot for
+# one frame, then back. We stop the handler from MOVING during the scale by turning off
+# its follow_fingertips — the scale math reads the hand tracker directly (via main's
+# _index_pinch_point), NOT the handler anchor, so scaling is unaffected. No reparenting,
+# so the grab/release lifecycle (which assumes child-of-handler) is untouched.
+var _two_hand_follow_was_on := true
+
 func set_two_hand(on: bool) -> void:
 	two_hand = on
 	if on:
@@ -338,10 +352,18 @@ func set_two_hand(on: bool) -> void:
 		_saved_collision_mask = collision_mask
 		collision_layer = 0
 		collision_mask = 0
+		# Freeze the holding handler's anchor so it stops dragging us (the second writer).
+		if picked_up_by != null:
+			_two_hand_follow_was_on = bool(picked_up_by.get("follow_fingertips"))
+			picked_up_by.set("follow_fingertips", false)
 	else:
+		# Restore the handler's fingertip-follow.
+		if picked_up_by != null:
+			picked_up_by.set("follow_fingertips", _two_hand_follow_was_on)
 		collision_layer = _saved_collision_layer
 		collision_mask = _saved_collision_mask
 		freeze = true if freeze_on_release else false
+		_follow_ready = false  # re-seed the one-euro follow from the current pose
 	_update_highlight()
 
 

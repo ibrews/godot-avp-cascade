@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.7.0-music"  # 30s music bed (scale-snapped), textured dissolve sound, gesture panel + hands-mode cycle, Best polish
+const APP_VERSION := "v0.7.1-scalefix2"  # FIX two-writer scale glitch: freeze holding handler's fingertip-follow during two-hand scale
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
