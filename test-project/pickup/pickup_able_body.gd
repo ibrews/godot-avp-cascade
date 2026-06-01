@@ -8,9 +8,11 @@ class_name PickupAbleBody3D
 # Two outline states: a soft "candidate" outline when this body is the closest
 # grabbable (pinch now to grab it), and a brighter/thicker "held" outline while
 # it's actually picked up. Both are inverted-hull overlays (highlight_shader).
-var _candidate_material : ShaderMaterial = _make_outline(Color(0.30, 0.80, 1.00, 1.0), 0.024)  # cyan
-var _held_material : ShaderMaterial = _make_outline(Color(0.45, 1.00, 0.55, 1.0), 0.045)        # green, thicker
-var _scale_material : ShaderMaterial = _make_outline(Color(0.15, 0.45, 1.00, 1.0), 0.075)       # BLUE, two-hand scale (thick + saturated so it's unmistakable)
+# `grow` is in LOCAL metres along the vertex normal (base shader default was 0.002 = 2mm).
+# Keep these small — large values explode the inverted hull. Blue (scale) is the thickest.
+var _candidate_material : ShaderMaterial = _make_outline(Color(0.30, 0.80, 1.00, 1.0), 0.004)  # cyan, thin
+var _held_material : ShaderMaterial = _make_outline(Color(0.45, 1.00, 0.55, 1.0), 0.008)        # green, thicker
+var _scale_material : ShaderMaterial = _make_outline(Color(0.12, 0.45, 1.00, 1.0), 0.014)       # BLUE, two-hand scale — thickest + saturated so it's unmistakable
 var picked_up_by : Area3D
 var closest_areas : Array
 
@@ -22,10 +24,14 @@ var _saved_collision_layer := 0
 var _saved_collision_mask := 0
 
 static func _make_outline(color: Color, width: float) -> ShaderMaterial:
+	# NOTE: the highlight shader's uniforms are `albedo` (color) and `grow` (width),
+	# NOT outline_color/outline_width. Setting the wrong names silently no-ops, which
+	# is why every outline rendered as the base material's yellow at grow=0.002
+	# (skinny) regardless of state. Use the real uniform names.
 	var base := load("res://shaders/highlight_material.tres") as ShaderMaterial
 	var m := base.duplicate() as ShaderMaterial
-	m.set_shader_parameter("outline_color", color)
-	m.set_shader_parameter("outline_width", width)
+	m.set_shader_parameter("albedo", color)
+	m.set_shader_parameter("grow", width)
 	return m
 
 # When true, the body stays frozen in place on release instead of falling/throwing.
@@ -77,6 +83,13 @@ const FOLLOW_POS_BETA := 0.7         # per (m/s)
 const FOLLOW_ROT_MIN_CUTOFF := 3.0   # Hz
 const FOLLOW_ROT_BETA := 0.35        # per (rad/s)
 const FOLLOW_DCUTOFF := 1.0          # Hz, cutoff for the speed estimates themselves
+# Spike rejection: a single bad XRHandTracker sample makes target_pos leap, which
+# spikes d_pos, opens the one-euro cutoff, and snaps the held body to the glitch for
+# one frame (then back) — the "glitches into other positions for a frame" report.
+# Clamp the target to a max plausible HAND speed each frame, so a superhuman jump is
+# capped (rejected) rather than chased; real fast moves up to the cap pass through.
+const FOLLOW_MAX_LIN_SPEED := 4.0    # m/s — hands don't outrun this; spikes are noise
+const FOLLOW_MAX_ANG_SPEED := 25.0   # rad/s — same idea for orientation
 var _follow_ready := false
 var _filt_pos : Vector3 = Vector3.ZERO
 var _filt_basis : Basis = Basis.IDENTITY
@@ -146,16 +159,31 @@ func _process(delta: float) -> void:
 		_filt_avel = 0.0
 		_follow_ready = true
 	else:
+		# --- Spike rejection (before the filter sees it). If this frame's target implies a
+		# superhuman hand speed, it's a tracking glitch, not a real move: clamp the target to
+		# the max-speed sphere around the current filtered pose. A genuine fast move (≤ cap)
+		# is untouched; a one-frame teleport is reined in so it can't snap the body. ---
+		var max_step := FOLLOW_MAX_LIN_SPEED * delta
+		var to_target := target_pos - _filt_pos
+		if to_target.length() > max_step:
+			target_pos = _filt_pos + to_target.normalized() * max_step
+		var max_ang_step := FOLLOW_MAX_ANG_SPEED * delta
+		var raw_ang := _filt_basis.get_rotation_quaternion().angle_to(target_basis.get_rotation_quaternion())
+		if raw_ang > max_ang_step and raw_ang > 0.0:
+			# Clamp the rotation target to the max angular step toward it.
+			target_basis = _filt_basis.slerp(target_basis, max_ang_step / raw_ang).orthonormalized()
+
 		var a_d := _oe_alpha(FOLLOW_DCUTOFF, delta)
-		# Position one-euro.
+		# Position one-euro. Cap the velocity estimate so the adaptive cutoff can't blow
+		# wide open from any residual spike (belt-and-suspenders with the clamp above).
 		var d_pos := (target_pos - _filt_pos) / delta
 		_filt_vel = _filt_vel.lerp(d_pos, a_d)
-		var p_cut := FOLLOW_POS_MIN_CUTOFF + FOLLOW_POS_BETA * _filt_vel.length()
+		var p_cut := FOLLOW_POS_MIN_CUTOFF + FOLLOW_POS_BETA * minf(_filt_vel.length(), FOLLOW_MAX_LIN_SPEED)
 		_filt_pos = _filt_pos.lerp(target_pos, _oe_alpha(p_cut, delta))
 		# Rotation one-euro (adaptive slerp).
 		var ang := _filt_basis.get_rotation_quaternion().angle_to(target_basis.get_rotation_quaternion())
 		_filt_avel = lerpf(_filt_avel, ang / delta, a_d)
-		var r_cut := FOLLOW_ROT_MIN_CUTOFF + FOLLOW_ROT_BETA * _filt_avel
+		var r_cut := FOLLOW_ROT_MIN_CUTOFF + FOLLOW_ROT_BETA * minf(_filt_avel, FOLLOW_MAX_ANG_SPEED)
 		_filt_basis = _filt_basis.slerp(target_basis, _oe_alpha(r_cut, delta)).orthonormalized()
 
 	global_transform = Transform3D(_filt_basis.scaled(_grab_scale), _filt_pos)

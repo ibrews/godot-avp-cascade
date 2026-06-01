@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.6.1-features"  # invader-explosion sfx+particles, mute btn, glow 50%, no-collision-while-transform, bluer scale outline, instructions copy
+const APP_VERSION := "v0.6.2-outlinefix"  # FIX: outline shader uniforms (was silent no-op → always skinny yellow); held-object spike rejection
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
