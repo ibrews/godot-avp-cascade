@@ -61,6 +61,21 @@ var _last_global_audio := 0.0
 var _physics_material: PhysicsMaterial
 var _shared_audio: AudioStreamPlayer3D
 var _audio_playback: AudioStreamGeneratorPlayback
+# Music bed (active only during a 30 s round). DEDICATED player + generator, NOT the
+# shared 3D one: the bed is a continuous loop fed every frame, and time-slicing the
+# 0.6 s shared buffer would starve the falling-cube chimes (and the bed shouldn't be
+# spatialised at the last cube-collision point). So music gets its own non-positional
+# AudioStreamPlayer with its own generator/playback. See KB godot-avp-procedural-audio.
+var _bed_audio: AudioStreamPlayer
+var _bed_playback: AudioStreamGeneratorPlayback
+var _bed_time := 0.0
+# ONE key for everything melodic — C minor pentatonic. The bass riff, the urgency
+# tones AND the random cube-collision chimes all snap to these notes so the chaotic
+# impacts harmonise into a tune over the bed instead of clashing.
+var _scale_freqs: Array = []   # sorted scale frequencies (octaves 2..6) for snapping
+# 8-beat looping bass riff as pentatonic scale-degree indices (0=C 1=Eb 2=F 3=G 4=Bb,
+# 5=C up an octave …). Catchy + a little goofy so the cube hits land on top of it.
+const BASS_PATTERN := [0, 0, 2, 4, 3, 4, 1, 0]
 var _flash_light: OmniLight3D
 var _flash_energy := 0.0
 var _active_cubes: Array = []
@@ -518,6 +533,19 @@ func _setup_audio():
 	_shared_audio.play()
 	_audio_playback = _shared_audio.get_stream_playback()
 
+	# Dedicated music-bed player (see _bed_audio note). Non-positional so the loop sits
+	# evenly in both ears; fed every frame from _update_music_bed only while a round runs.
+	_bed_audio = AudioStreamPlayer.new()
+	var bed_gen := AudioStreamGenerator.new()
+	bed_gen.mix_rate = SAMPLE_RATE
+	bed_gen.buffer_length = 0.5
+	_bed_audio.stream = bed_gen
+	_bed_audio.volume_db = -10.0
+	add_child(_bed_audio)
+	_bed_audio.play()
+	_bed_playback = _bed_audio.get_stream_playback()
+	_build_scale_freqs()
+
 # Build one XRController3D + PickupHandler3D + hand mesh per hand.
 func _setup_hands() -> void:
 	var xr_origin := $XROrigin3D
@@ -706,6 +734,7 @@ func _process(delta: float):
 
 	_update_info_panel(delta)
 	_update_timer(delta)
+	_update_music_bed(delta)
 	_update_arms_button(delta)
 	_update_mute_button(delta)
 	_update_leaderboard(delta)
@@ -876,13 +905,15 @@ func _on_cube_collision(other_body: Node3D, cube: RigidBody3D):
 	_flash_light.position = cube.global_position
 	_flash_energy = 3.5
 	var is_sphere := cube.is_in_group("sphere")
+	# Snap every impact pitch to the C-minor-pentatonic scale so the random cube hits
+	# harmonise with the music bed (and each other) into a tune instead of clashing.
 	if other_body.is_in_group("cube"):
-		_push_chime(randf_range(700.0, 1500.0), 0.036, false)
+		_push_chime(_snap_to_scale(randf_range(700.0, 1500.0)), 0.036, false)
 	elif is_sphere:
 		# Transmuted spheres: hollow, woody knock (lower, longer, detuned harmonic).
-		_push_chime(randf_range(180.0, 420.0), 0.14, true)
+		_push_chime(_snap_to_scale(randf_range(180.0, 420.0)), 0.14, true)
 	else:
-		_push_chime(randf_range(260.0, 700.0), 0.10, true)
+		_push_chime(_snap_to_scale(randf_range(260.0, 700.0)), 0.10, true)
 
 func _on_bubble_passed(cube: Node3D, at: Vector3):
 	if not is_instance_valid(cube) or cube.is_in_group("sphere"):
@@ -1161,6 +1192,94 @@ func _push_invader_explosion():
 		s += (randf() * 2.0 - 1.0) * exp(-9.0 * u) * 0.4
 		s = clampf(s, -1.0, 1.0)
 		_audio_playback.push_frame(Vector2(s, s))
+
+# --- Musical scale (C minor pentatonic) + 30 s music bed ---------------------
+
+# Precompute scale frequencies across octaves 2..6 so any random impact pitch can be
+# snapped to the nearest in-key note. C minor pentatonic pitch classes: C Eb F G Bb.
+func _build_scale_freqs() -> void:
+	var pcs: Array[int] = [0, 3, 5, 7, 10]
+	_scale_freqs.clear()
+	for octave in range(2, 7):
+		for pc in pcs:
+			var midi: int = 12 * (octave + 1) + pc   # C2 = MIDI 36
+			_scale_freqs.append(440.0 * pow(2.0, (float(midi) - 69.0) / 12.0))
+	_scale_freqs.sort()
+
+# Snap an arbitrary frequency to the nearest scale note, so random collision chimes
+# land in-key and harmonise with the bass bed instead of clashing.
+func _snap_to_scale(freq: float) -> float:
+	if _scale_freqs.is_empty():
+		return freq
+	var best: float = _scale_freqs[0]
+	var best_d: float = absf(freq - best)
+	for f in _scale_freqs:
+		var d: float = absf(freq - f)
+		if d < best_d:
+			best_d = d
+			best = f
+	return best
+
+# Frequency of a bass scale-degree (0=C2). Degrees beyond the 5-note pentatonic wrap
+# up octaves, so the riff pattern can climb past Bb into the next C.
+func _bass_freq(degree: int) -> float:
+	var pcs: Array[int] = [0, 3, 5, 7, 10]
+	var n := pcs.size()
+	var d := ((degree % n) + n) % n
+	var oct_bump := int(floor(float(degree) / float(n)))
+	var midi: int = 12 * (2 + 1) + pcs[d] + 12 * oct_bump   # base octave 2
+	return 440.0 * pow(2.0, (float(midi) - 69.0) / 12.0)
+
+# Fill the dedicated bed generator each frame while a round is active. The bed is a
+# 1-beat-per-second bass riff + kick + hats so the player can FEEL the clock; the
+# final ~6 s ramp `urg` 0→1 (louder, faster hats, an octave-up bass, a tension tone)
+# so the last seconds intensify audibly. Silent (unfed) when no round is running.
+func _update_music_bed(_delta: float) -> void:
+	if _bed_playback == null or not _timer_active:
+		return
+	var avail := _bed_playback.get_frames_available()
+	if avail <= 0:
+		return
+	# Urgency ramps in only over the final 6 s — that's where it should feel frantic.
+	var urg := clampf((6.0 - _timer_remaining) / 6.0, 0.0, 1.0)
+	for i in range(avail):
+		var s := _bed_sample(_bed_time, urg)
+		_bed_playback.push_frame(Vector2(s, s))
+		_bed_time += 1.0 / SAMPLE_RATE
+
+# One bed sample at absolute bed-time t (seconds), with urgency 0..1.
+func _bed_sample(t: float, urg: float) -> float:
+	var beat_dur := 1.0
+	var beat := int(t / beat_dur)
+	var frac := t - float(beat) * beat_dur
+	var out := 0.0
+
+	# Bass riff — one pluck per beat from the looping pattern; jumps up an octave as
+	# urgency rises so the tune lifts in the final seconds.
+	var bfreq := _bass_freq(BASS_PATTERN[beat % BASS_PATTERN.size()])
+	if urg > 0.5:
+		bfreq *= 2.0
+	var benv := exp(-2.2 * frac) * (1.0 - exp(-60.0 * frac))   # quick attack, beat-long decay
+	out += (sin(TAU * bfreq * t) * 0.6 + sin(TAU * bfreq * 2.0 * t) * 0.2) * benv * 0.30
+
+	# Kick on every beat (phase keyed to frac so each thump is clean).
+	var kf: float = lerp(150.0, 50.0, clampf(frac / 0.12, 0.0, 1.0))
+	out += sin(TAU * kf * frac) * exp(-16.0 * frac) * 0.5
+
+	# Backbeat hat on the off-beat.
+	var hp := frac - 0.5
+	if hp >= 0.0 and hp < 0.06:
+		out += (randf() * 2.0 - 1.0) * exp(-40.0 * hp) * 0.12
+
+	# Urgency: extra 16th-note hats + a rising tension tone in the last seconds.
+	if urg > 0.05:
+		var q := fmod(frac, 0.25)
+		if q < 0.04:
+			out += (randf() * 2.0 - 1.0) * exp(-60.0 * q) * 0.10 * urg
+		out += sin(TAU * (660.0 + 240.0 * urg) * t) * 0.06 * urg
+
+	out *= 0.9 + 0.4 * urg
+	return clampf(out, -1.0, 1.0)
 
 # Returns which finger tip (15=middle, 20=ring, 25=pinky) is pinching the thumb,
 # or -1 if none. "Closest wins": only the single finger nearest the thumb counts,
@@ -1457,6 +1576,7 @@ func _start_round() -> void:
 	_timer_active = true
 	_timer_remaining = ROUND_SECONDS
 	_round_score = 0
+	_bed_time = 0.0   # restart the music bed at beat 0
 	_start_cooldown = 1.0
 	_push_sweep(300.0, 900.0, 0.25)  # start chirp
 	_refresh_button_label()
@@ -1611,6 +1731,8 @@ func _toggle_mute() -> void:
 	# gating every synth path). volume restored on unmute.
 	if _shared_audio != null:
 		_shared_audio.volume_db = -80.0 if _muted else -3.0
+	if _bed_audio != null:
+		_bed_audio.volume_db = -80.0 if _muted else -10.0
 	# Depress animation (reuse the press feedback pattern).
 	if _mute_btn_face != null:
 		var tw := create_tween()
