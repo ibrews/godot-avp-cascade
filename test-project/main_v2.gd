@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.6.2-outlinefix"  # FIX: outline shader uniforms (was silent no-op → always skinny yellow); held-object spike rejection
+const APP_VERSION := "v0.6.3-scalefix"  # FIX: object-scale spike rejection + smoothing (jitter was amplified by scale factor)
 
 const SPAWN_INTERVAL := 0.55
 const KILL_Y := -2.0
@@ -95,6 +95,16 @@ var _scale_B0 := Vector3.ZERO
 var _scale_WA := Vector3.ZERO   # world points under the pinches at engage — world case
 var _scale_WB := Vector3.ZERO
 var _scale_T0: Transform3D = Transform3D.IDENTITY  # target object transform at engage
+# Object-scale smoothing/spike-rejection. The object branch writes the transform raw
+# from the live pinches every frame, and its position term is multiplied by the scale
+# factor — so a single bad pinch sample (or jittery rotation) gets AMPLIFIED once the
+# object is much bigger, snapping it for a frame. Mirror the held-body fix: low-pass
+# the applied transform and clamp the per-frame origin step to reject spikes.
+var _scale_filt_ready := false
+var _scale_filt_origin := Vector3.ZERO
+var _scale_filt_basis := Basis.IDENTITY
+const SCALE_FOLLOW_ALPHA := 0.5        # 0..1 per frame ease toward the raw target (1 = no smoothing)
+const SCALE_MAX_ORIGIN_STEP := 0.6     # metres/frame cap — real moves pass, teleports clamped
 var _two_hand_world_active := false  # suppress single-hand handle drag while two-handing the world
 var _prev_grabbed := {"left_hand": false, "right_hand": false}  # for the grab "thunk" SFX
 
@@ -2034,6 +2044,7 @@ func _update_two_hand_scale() -> void:
 		else:
 			_scale_target = obj
 			_scale_T0 = obj.global_transform
+			_scale_filt_ready = false   # seed the scale smoothing filter fresh this gesture
 			if obj.has_method("set_two_hand"):
 				obj.set_two_hand(true)
 
@@ -2060,7 +2071,25 @@ func _update_two_hand_scale() -> void:
 		var s: float = clampf(v1.length() / v0.length(), SCALE_MIN, SCALE_MAX)
 		var rot := Basis(Quaternion(v0.normalized(), v1.normalized()))
 		var lin := rot * s
-		_scale_target.global_transform = Transform3D(lin * _scale_T0.basis, PA + lin * (_scale_T0.origin - _scale_A0))
+		var raw_origin: Vector3 = PA + lin * (_scale_T0.origin - _scale_A0)
+		var raw_basis: Basis = lin * _scale_T0.basis
+		# Spike-reject + smooth (raw path amplifies pinch jitter by the scale factor).
+		if not _scale_filt_ready:
+			_scale_filt_origin = raw_origin
+			_scale_filt_basis = raw_basis
+			_scale_filt_ready = true
+		else:
+			# Clamp a superhuman one-frame jump in position, then ease toward the target.
+			var step: Vector3 = raw_origin - _scale_filt_origin
+			if step.length() > SCALE_MAX_ORIGIN_STEP:
+				raw_origin = _scale_filt_origin + step.normalized() * SCALE_MAX_ORIGIN_STEP
+			_scale_filt_origin = _scale_filt_origin.lerp(raw_origin, SCALE_FOLLOW_ALPHA)
+			# Basis carries scale, so use a plain componentwise ease (slerp is rotation-only).
+			_scale_filt_basis = Basis(
+				_scale_filt_basis.x.lerp(raw_basis.x, SCALE_FOLLOW_ALPHA),
+				_scale_filt_basis.y.lerp(raw_basis.y, SCALE_FOLLOW_ALPHA),
+				_scale_filt_basis.z.lerp(raw_basis.z, SCALE_FOLLOW_ALPHA))
+		_scale_target.global_transform = Transform3D(_scale_filt_basis, _scale_filt_origin)
 
 func _end_scale() -> void:
 	if _scale_active:
