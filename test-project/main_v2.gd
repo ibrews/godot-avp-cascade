@@ -1391,14 +1391,50 @@ func _toggle_immersion() -> void:
 			var tw := create_tween()
 			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 0.0, 1.0, 0.8).set_trans(Tween.TRANS_SINE)
 		_shard_burst(center, 2.6, Color(0.45, 0.65, 1.0), false, 48)  # converge / materialize
-		_push_sweep(300.0, 900.0, 0.45)                               # rising (hand "show")
+		_push_dissolve_texture(true)                                  # rain/typing, rising pitch
 	else:
 		if _sky_mat != null:
 			var tw := create_tween()
 			tw.tween_method(func(v: float): _sky_mat.set_shader_parameter("dissolve", v), 1.0, 0.0, 0.8).set_trans(Tween.TRANS_SINE)
 			tw.tween_callback(func(): if _skybox != null: _skybox.visible = false)
 		_shard_burst(center, 2.6, Color(0.80, 0.88, 1.0), true, 48)   # scatter / dissolve
-		_push_sweep(900.0, 300.0, 0.45)                               # falling (hand "hide")
+		_push_dissolve_texture(false)                                 # rain/typing, falling pitch
+
+# Granular "rain / keyboard-typing" texture spanning the WHOLE 0.8 s sky dissolve —
+# a stream of short scale-snapped ticks scheduled across the transition (pitch rising
+# for materialize, falling for dissolve). Textured/organic, not a single tone. Each
+# tick re-checks _muted at fire time so muting mid-transition silences the rest.
+func _push_dissolve_texture(rising: bool) -> void:
+	# Centre the shared 3D player on the user so the rain isn't stuck at the last
+	# cube-collision point (which could be far/quiet).
+	var cam := get_viewport().get_camera_3d()
+	if _shared_audio != null and cam != null:
+		_shared_audio.position = cam.global_position
+	var span := 0.78
+	var ticks := 30
+	for i in range(ticks):
+		var u := float(i) / float(ticks - 1)
+		# Jittered schedule so it reads as organic rain/typing, not a metronome.
+		var at: float = clampf(u * span + randf_range(-0.015, 0.015), 0.0, span)
+		var prog := u if rising else (1.0 - u)
+		var base: float = lerp(320.0, 1500.0, prog) * randf_range(0.85, 1.18)
+		var freq := _snap_to_scale(base)
+		get_tree().create_timer(at).timeout.connect(_push_tick.bind(freq))
+
+# One short raindrop / keystroke tick: a fast-decaying pitched blip with a click
+# transient. Mute is checked here (not at schedule time) so it can stop mid-stream.
+func _push_tick(freq: float) -> void:
+	if _muted or _audio_playback == null:
+		return
+	var dur := 0.028
+	var n := int(SAMPLE_RATE * dur)
+	var to_fill: int = min(n, _audio_playback.get_frames_available())
+	for i in range(to_fill):
+		var t := float(i) / SAMPLE_RATE
+		var u := t / dur
+		var s := sin(TAU * freq * t) * exp(-46.0 * u) * 0.32
+		s += (randf() * 2.0 - 1.0) * exp(-120.0 * u) * 0.10   # click transient
+		_audio_playback.push_frame(Vector2(s, s))
 
 # Shared shard effect — small emissive cubes that fly outward (dissolve) or
 # converge inward (materialize) around a center. Used by the immersion toggle and
