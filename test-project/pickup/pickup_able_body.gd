@@ -101,11 +101,7 @@ var _grab_rot_offset : Basis = Basis.IDENTITY   # held body's basis relative to 
 # the finger and makes the object rotate ABOUT that point, not snap its centre to the hand.
 # Without it, grabbing a wide panel by its edge teleported the panel centre onto your fingertip
 # (so you'd then poke a button you didn't mean to). Captured in pick_up, applied in _process.
-var _grab_pos_offset : Vector3 = Vector3.ZERO  # (legacy, kept for the offset-replay path; unused now)
 var _grab_scale : Vector3 = Vector3.ONE
-# One-hand follow anchors, captured at grab (centre tracks hand translation; rotates in place):
-var _grab_holder_origin0 : Vector3 = Vector3.ZERO   # holder (hand) world position at grab
-var _grab_body_origin0 : Vector3 = Vector3.ZERO     # body world position (centre) at grab
 
 
 # Called when this object becomes the closest body in an area
@@ -157,18 +153,14 @@ func _process(delta: float) -> void:
 		return
 
 	var holder_xform := holder.global_transform
-	# One-hand follow: ROTATE ABOUT THE BODY CENTRE, with the centre tracking the hand's
-	# TRANSLATION only. (User wants single-hand rotation; centre as the pivot is fine.)
-	#   target_pos = body-centre-at-grab + (hand moved since grab)  → centre follows the hand
-	#                1:1 in translation; it does NOT orbit, because we add the hand's position
-	#                delta, not rotate a lever-arm offset. This avoids the v0.8.0 whip where a
-	#                wide panel grabbed at the edge swung through huge arcs (and swept its
-	#                buttons through pokeable space — it fired START, see the video).
-	#   target_basis = hand rotation × grab-relative offset → the object spins in place about
-	#                its own centre as you turn your wrist. Natural, no arc, no centre-snap-to-
-	#                finger. Scale stays the deliberate TWO-HAND gesture.
-	var hand_delta := holder_xform.origin - _grab_holder_origin0
-	var target_pos := _grab_body_origin0 + hand_delta
+	# One-hand follow (the v0.1.8-smooth behaviour the user liked): the body CENTRE rides the
+	# pinch centre (= the handler/fingertip anchor), and orientation follows the hand via the
+	# grab-relative offset. You manipulate the object from its centre and keep a firm hold as
+	# you move + rotate. Accidental button presses are prevented by the manipulation gate +
+	# edge-triggered pokes in main_v2 (_manipulating / _update_poke_buttons), NOT by changing
+	# this grab feel. (The v0.8.x "grab-from-point" / "rotate-about-centre-tracking-translation"
+	# experiments both felt wrong and are reverted.)
+	var target_pos := holder_xform.origin
 	var target_basis := (holder_xform.basis.orthonormalized() * _grab_rot_offset).orthonormalized()
 
 	if not _follow_ready or delta <= 0.0:
@@ -262,15 +254,8 @@ func pick_up(pick_up_by) -> void:
 	var holder := pick_up_by as Node3D
 	if holder != null:
 		_grab_rot_offset = holder.global_transform.basis.orthonormalized().inverse() * current_transform.basis.orthonormalized()
-		# Anchors for the translation-tracks-hand / rotate-about-centre follow (see _process):
-		# the centre moves by the hand's position delta since grab, so no orbit/whip and no
-		# centre-snap-to-finger; orientation spins in place via _grab_rot_offset.
-		_grab_holder_origin0 = holder.global_transform.origin
-		_grab_body_origin0 = current_transform.origin
 	else:
 		_grab_rot_offset = Basis.IDENTITY
-		_grab_holder_origin0 = Vector3.ZERO
-		_grab_body_origin0 = current_transform.origin
 	_grab_scale = current_transform.basis.get_scale()
 	_follow_ready = false   # seed the filter from the current pose on the first frame
 

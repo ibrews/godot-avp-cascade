@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.8.1-pokeguard"  # grab rotate-about-centre (no whip); buttons EDGE-triggered + locked during manipulation (no accidental press on grab/release)
+const APP_VERSION := "v0.8.2-grabrevert"  # grab back to v0.1.8 centre-rides-pinch feel; keep button guardrails (manipulation gate + edge-triggered pokes)
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
