@@ -1,6 +1,6 @@
 # godot-avp-cascade
 
-**Falling Cascade** — a self-running physics + procedural-audio demo for Apple Vision Pro, built on the Godot game engine via Apple's official upstream visionOS XR contribution (PR [#109975](https://github.com/godotengine/godot/pull/109975)).
+**Cascade Countdown** — a self-running physics + procedural-audio demo for Apple Vision Pro, built on the Godot game engine via Apple's official upstream visionOS XR contribution (PR [#109975](https://github.com/godotengine/godot/pull/109975)).
 
 Twenty-five emissive cubes — 8-colour fire-plasma palette, randomised sizes — drop onto a tilted catch plate in your immersive space. Each collision triggers a procedurally-synthesized chime (plate chimes have an octave harmonic; cube-on-cube tinks are brighter and shorter). Reach in with your hand and **pinch to grab and throw** any cube. Walk around it.
 

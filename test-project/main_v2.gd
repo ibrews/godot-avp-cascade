@@ -616,7 +616,7 @@ func _build_info_panel() -> void:
 
 	# Text stack — title (white), handle (brand orange), version (dim). Rigid (no
 	# per-element billboard); the whole panel faces the camera in _update_info_panel.
-	var title := _panel_label("A Godot Sample", 46, Color(1.0, 1.0, 1.0, 1.0), 10)
+	var title := _panel_label("Cascade Countdown", 46, Color(1.0, 1.0, 1.0, 1.0), 10)
 	title.position = Vector3(0.0, 0.034, 0.006)
 	root.add_child(title)
 	var handle := _panel_label("by @ibrews", 40, Color(1.0, 0.55, 0.10, 1.0), 9)
