@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.8.0-controls"  # grab-pivot fix + high-score fireworks/cheer + ONE 6-button control panel + dissolve-sound polish
+const APP_VERSION := "v0.8.1-pokeguard"  # grab rotate-about-centre (no whip); buttons EDGE-triggered + locked during manipulation (no accidental press on grab/release)
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -1992,25 +1992,50 @@ func _refresh_best_panel() -> void:
 	if _best_panel_label != null:
 		_best_panel_label.text = str(_best_score)
 
-# Drive every registered poke button: cooldown tick, fingertip-distance test, then
-# depress + click + callback. Used by the gesture panel (START/ARMS/MUTE stay bespoke).
+# True while ANY object is being manipulated by a hand — held by either hand, OR a
+# two-hand scale/rotate is active, OR the world handle is grabbed. While this is true we
+# suppress ALL button pokes: a held/scaled object (or a moved panel) sweeps through
+# pokeable space and was firing buttons by accident (e.g. START — see the grab video).
+# The grab pinch (index) is the same gesture as a poke, so a busy hand must not also poke.
+func _manipulating() -> bool:
+	if _scale_active:
+		return true
+	if _handle_held_side != "":
+		return true
+	for side in ["left_hand", "right_hand"]:
+		var h = _hand_handlers.get(side)
+		if h != null and h.picked_up_body != null:
+			return true
+	return false
+
+# Drive every registered poke button. EDGE-TRIGGERED: a button fires only on an
+# outside→inside transition of a fingertip, never while the finger merely rests inside.
+# This is what makes release-from-a-grabbed-panel safe: at release your pinch fingers are
+# sitting right on the buttons, so a level-triggered poke would fire instantly. We keep
+# updating each button's per-side "inside" flag EVERY frame — including while manipulation
+# suppresses firing — so a finger that's already inside at release is already flagged
+# inside ⇒ no rising edge ⇒ no poke until you pull out and poke back in.
 func _update_poke_buttons(delta: float) -> void:
+	var suppress := _manipulating()
 	for e in _poke_buttons:
 		e["cooldown"] = maxf(0.0, float(e["cooldown"]) - delta)
-	for e in _poke_buttons:
-		if float(e["cooldown"]) > 0.0:
-			continue
 		var btn: Node3D = e["node"]
-		if not is_instance_valid(btn) or not btn.visible:
-			continue
+		var visible_ok: bool = is_instance_valid(btn) and btn.visible
+		if not e.has("inside"):
+			e["inside"] = {"left_hand": false, "right_hand": false}
+		var inside: Dictionary = e["inside"]
 		for side in ["left_hand", "right_hand"]:
 			var tip = _index_tip_world(side)
-			if tip != null and (tip as Vector3).distance_to(btn.global_position) <= 0.045:
+			var now_inside: bool = visible_ok and tip != null \
+				and (tip as Vector3).distance_to(btn.global_position) <= 0.045
+			var was_inside: bool = bool(inside[side])
+			# Fire ONLY on the rising edge, and only when not suppressed + off cooldown.
+			if now_inside and not was_inside and not suppress and float(e["cooldown"]) <= 0.0:
 				e["cooldown"] = 0.6
 				_depress(e["face"])
 				_push_click()
 				(e["cb"] as Callable).call()
-				break
+			inside[side] = now_inside  # ALWAYS update, even while suppressed (the crux)
 
 # Shared depress animation for poke buttons (the face dips in Z, then springs back).
 func _depress(face: Node3D) -> void:
@@ -2259,22 +2284,29 @@ func _attach_destruct_button(panel: Node3D, local_pos: Vector3) -> void:
 	panel.add_child(btn)
 	_panels.append({"panel": panel, "button": btn})
 
-# Watch for a finger poke on any panel's destruct button.
+# Watch for a finger poke on any panel's destruct button. EDGE-TRIGGERED (same rule as the
+# control-panel buttons): fire only on an outside→inside transition, and keep tracking
+# "inside" every frame even while manipulation suppresses firing — so releasing a grabbed
+# panel with your fingers resting on its destruct button does NOT instantly explode it.
 func _update_destruct(delta: float) -> void:
 	_destruct_cooldown = maxf(0.0, _destruct_cooldown - delta)
-	if _destruct_cooldown > 0.0:
-		return
+	var suppress := _manipulating()
 	for entry in _panels:
 		var panel: Node3D = entry["panel"]
 		var btn: Node3D = entry["button"]
-		if panel == null or not is_instance_valid(panel) or not panel.visible:
-			continue
+		var visible_ok: bool = panel != null and is_instance_valid(panel) and panel.visible
+		if not entry.has("inside"):
+			entry["inside"] = {"left_hand": false, "right_hand": false}
+		var inside: Dictionary = entry["inside"]
 		for side in ["left_hand", "right_hand"]:
 			var tip = _index_tip_world(side)
-			if tip != null and (tip as Vector3).distance_to(btn.global_position) <= 0.05:
+			var now_inside: bool = visible_ok and tip != null \
+				and (tip as Vector3).distance_to(btn.global_position) <= 0.05
+			var was_inside: bool = bool(inside[side])
+			if now_inside and not was_inside and not suppress and _destruct_cooldown <= 0.0:
 				_dissolve_panel(panel)
 				_destruct_cooldown = 0.6
-				return
+			inside[side] = now_inside  # ALWAYS update, even while suppressed
 
 # Explode a panel into shards and hide it (un-grabbable until a reset restores it).
 func _dissolve_panel(panel: Node3D) -> void:
