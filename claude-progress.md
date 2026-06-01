@@ -2,6 +2,62 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ⚠️ STATE (2026-05-31, session 6) — v0.8.0-controls: 4 ITEMS SHIPPED — READ FIRST
+
+Device app **v0.8.0-controls** built (validate gate clean: 0 errors / 1 "Sandbox built";
+PCK parity OK; BUILD SUCCEEDED) + **installed to AVP** (devicectl, attempt 1).
+**Awaiting Alex's on-headset verify** (quit + relaunch on the headset to load the reinstall).
+Ran in an **isolated worktree** (`agent-a716da0d49930d981`) — the right pattern; commits on a
+worktree branch on top of `e291a91`, pushed to origin/main at session end. Pure GDScript;
+borrowed `libgodot.a` (`f968292d`) untouched, NO engine recompile.
+
+**The 4 items (all device-installed, awaiting verify):**
+1. **Grab-pivot fix** (`pickup/pickup_able_body.gd`). One-handed grabs were forcing the body
+   CENTRE to the hand (grab a panel by its edge → centre snapped to finger → you'd poke a
+   button). Now captures `_grab_pos_offset` = body-centre in holder-local frame at grab and
+   replays it each frame (`target_pos = holder.origin + holder.basis.orthonormalized() *
+   _grab_pos_offset`) → the GRABBED POINT stays under the finger and the object orbits that
+   point. Holder basis orthonormalized on replay so holder scale isn't double-applied;
+   `_grab_scale` still composes; one-euro spike-rejection/clamp unaffected. KB:
+   `godot-avp-grab-smoothing.md`.
+2. **New-high-score fireworks + cheer** (`main_v2.gd`). On round end: beat PERSONAL best →
+   scene-spanning fireworks cascade (multiple staggered bursts scattered around the player,
+   warm/gold) + procedural crowd cheer (`_push_cheer`: filtered-noise roar swell + bright
+   in-key C-minor-pentatonic chord). Beat ONLINE leaderboard TOP (`_lb_top_score`, captured in
+   `_on_lb_completed`) → bigger/distinct (more bursts, wider spread, electric cyan/magenta, a
+   longer cheer + sparkle tail). `_celebrate_high_score(tier)`. Shared-audio buffer 0.6→1.0s so
+   the cheer isn't clipped. Respects `_muted`.
+3. **ONE control panel** (`_build_control_panel`, replaces `_build_gesture_panel` + the standalone
+   START/ARMS/MUTE nodes). Grabbable PickupAbleBody3D, 2-col×3-row grid of **6** poke buttons:
+   HANDS (mesh↔real cycle, ONE button) / START / MUTE / GESTURES / SKY / RESET + a big BEST
+   readout. All six use the shared `_poke_buttons` registry (`_update_poke_buttons`, world-pos
+   poke → follows the panel when grabbed). Removed `_build_start_button`/`_build_arms_button`/
+   `_build_mute_button` + pollers `_update_arms_button`/`_update_mute_button` + `_press_button`/
+   `_press_arms_button`; stripped the poke-loop from `_update_timer` (countdown/pulse stays).
+   START callback = `_gp_start` (start/cancel, gated by `_start_cooldown`). Cleaned orphaned vars.
+   NO destruct button on this panel (per request).
+4. **Dissolve-sound polish** (`_push_dissolve_texture`/`_push_tick`). Duration now from the new
+   `SKY_DISSOLVE_SEC` (0.8s) constant — SAME value drives the shader `dissolve` tween, so sound
+   and visual can never drift. Fewer ticks (~13 vs 30), ease-in-out swell schedule (sparse ends,
+   bunched middle), per-tick varied timbre (pure drop / bell / detuned-woody) + decay + amplitude
+   = textured shimmer, not a glitchy uniform burst. Still in-key (snapped); rises on materialize,
+   falls on dissolve.
+
+**Worktree build note (cost time — log to KB):** the spawned worktree did NOT contain the
+gitignored/untracked heavy build artifacts (Godot.app, the xcframeworks, the .xcodeproj, the
+app build-support files, `.godot/` import cache). Fixed by **symlinking** them from the main
+checkout into the worktree (Godot.app + the `out/xcode-visionos/*.xcframework`/PrivacyInfo +
+the `GodotVisionPilot/` support files), **copying** the small `.xcodeproj` as a REAL dir (so its
+`<group>`-relative pck/xcframework refs resolve to the WORKTREE, not main — a symlinked xcodeproj
+would have built main's pck), and running `Godot --import` once to rebuild the global `class_name`
+registry (else every `PickupAbleBody3D`/`SpawnEmitter3D`/etc. = "type not in scope" at validate).
+None of those symlinks/copies are committed (binary-guard clean on all commits).
+
+**HEADSET VERIFY CHECKLIST — see the session report / README Things to Try.**
+
+---
+
+
 ## ⚠️ STATE (2026-05-31, session 5) — 4 NEW FEATURES SHIPPED (v0.7.0-music) — READ FIRST
 
 Device app **v0.7.0-music** built (PCK parity OK) + installed to AVP; **awaiting Alex's
