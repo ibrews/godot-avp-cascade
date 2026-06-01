@@ -102,10 +102,11 @@ xcrun devicectl device install app \
 
 1. **Confirm the scene renders at 90 FPS.** Pull diagnostic frame counts after a run: `xcrun devicectl device copy from --device <UDID> --source Documents/xr_diag.txt --destination /tmp/xr_diag.txt --domain-type appDataContainer --domain-identifier com.agilelens.godotvisionpilot`. Per-5s frame deltas should be exactly 450.
 2. **Grab and throw a cube.** Pinch (index + thumb) near any glowing cube — it snaps to your pinch point. Flick your wrist and release to throw it into the goal ring.
-3. **Play the 30-second time attack.** Poke the green **START** button. Land cubes in the goal ring and chain fast surface hits for a multiplier (up to x8). Your score posts to the global leaderboard panel.
+3. **Play the 30-second time attack — with a soundtrack.** Poke the green **START** button. A looping bass-and-drum bed plays one beat per second so you can hear the clock; the final few seconds speed up and rise in pitch. Every cube impact is pitch-snapped to the same key, so the chaos harmonises into a tune over the bed. Land cubes in the goal ring and chain fast surface hits for a multiplier (up to x8); your score posts to the global leaderboard.
 4. **Scale and rotate the whole world.** Pinch the floating chrome handle bar with **both** hands and move them apart / rotate — the world scales and spins around you (the ring turns blue). Pinch any object with both hands to scale just that object (its outline turns blue).
-5. **Use the poke buttons.** Poke **WRIST** to toggle your real arms (Persona passthrough) on/off; poke **MUTE** to silence the sound; poke any panel's red button for a Space-Invaders-style explosion (ring-pinch resets everything).
-6. **Switch immersion.** Pinky-pinch dissolves the sky between full immersion and passthrough mixed reality. Mixed reality composites cleanly over passthrough with no halos (see the depth-bias fix below).
+5. **Use the gesture panel.** A grabbable panel by the START/MUTE buttons has a poke button for each pinch gesture — **HANDS** (show/hide), **RESET**, **SKY** — plus a **GESTURES** master toggle to disable middle/ring/pinky pinches if you keep triggering them by accident (index-pinch grab always works). It also shows your **★ BEST ★** score.
+6. **Switch between mesh hands and real arms.** Poke the **HANDS** button to cycle between the virtual mesh hands and your real Persona arms (passthrough) — they're mutually exclusive. Poke **MUTE** to silence everything; poke any panel's red button for a Space-Invaders explosion (ring-pinch resets).
+7. **Switch immersion and listen.** Pinky-pinch dissolves the sky between full immersion and passthrough mixed reality — now with a textured rain/typing sound that spans the whole 0.8s transition (pitch rises in, falls out). Mixed reality composites cleanly over passthrough with no halos (see the depth-bias fix below).
 
 ## Building the engine
 

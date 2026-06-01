@@ -2,6 +2,43 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ⚠️ STATE (2026-05-31, session 5) — 4 NEW FEATURES SHIPPED (v0.7.0-music) — READ FIRST
+
+Device app **v0.7.0-music** built (PCK parity OK) + installed to AVP; **awaiting Alex's
+on-headset verify** (must quit+relaunch on headset to load the reinstall). All 4 are pure
+GDScript in `test-project/main_v2.gd` — NO engine recompile, borrowed `libgodot.a` untouched.
+Commits `1028d34`, `152cb69`, `a220f7a` on top of `ef9cc8b`.
+
+**⚠️ CONCURRENCY NOTE:** a *separate* live Claude session committed **`ef9cc8b` v0.6.3-scalefix**
+(object two-hand-scale spike rejection) into main DURING this session — my Read saw v0.6.2,
+the file changed to v0.6.3 mid-session (mtime + a fresh commit confirmed it). I built my 4
+features ON TOP of ef9cc8b (their work is good + untouched — it's in `_update_two_hand_scale`,
+which none of my features touch). Lesson reinforced (already in the notes): **spawned chips on
+this repo must use their own worktree** — two agents editing main_v2.gd in-place is a live hazard.
+
+**The 4 features (all device-installed, awaiting verify):**
+1. **Textured dissolve/materialize sound** — `_push_dissolve_texture()` schedules ~30 short
+   scale-snapped ticks (jittered) across the full 0.8s sky dissolve = rain/typing, not one tone.
+   Pitch rises on materialize / falls on dissolve. Mute checked at fire time.
+2. **Gesture button panel** (`_build_gesture_panel`, grabbable, NO destruct button, left of
+   ARMS/MUTE at `(-0.66,1.16,-0.45)`): poke buttons HANDS / RESET / SKY + a **GESTURES** master
+   toggle (`_gestures_enabled`, gates the middle/ring/pinky dispatch ~line 729; index grab never
+   gated) + a big ★BEST★ readout. New generic `_poke_buttons` registry + `_update_poke_buttons`.
+   The **ARMS button is now a HANDS-MODE cycle** (`_cycle_hands_mode`): MESH hands ↔ REAL Persona
+   arms, mutually exclusive (synced at launch in `_load_arms_pref`).
+3. **Best score polish** — START label `best %d`→`Best: %d`; Best also on the gesture panel
+   (bigger). Persistence unchanged (`user://best.txt`, survives relaunch — confirmed correct).
+4. **30s music bed** — DEDICATED `_bed_audio` (non-positional AudioStreamPlayer + own generator;
+   NOT the shared 0.6s 3D buffer, which would starve the chimes). 1 beat/s bass+kick+hat loop,
+   final-6s urgency ramp (louder/faster/octave-up). ONE key = **C minor pentatonic**: bass riff,
+   urgency tones, AND all cube-collision chimes snap to it (`_snap_to_scale`) so impacts
+   harmonise. Bed fed only while `_timer_active`; resets `_bed_time=0` on round start; muted with
+   the rest. Gotcha hit: untyped array elements → `Cannot infer type of "midi"`; typed the
+   pentatonic `pcs` arrays `Array[int]`.
+
+---
+
+
 ## ⚠️ STATE (2026-05-31, session 4) — MIXED-IMMERSION ALPHA HALO FIXED (v0.6.0-depthfix) — READ FIRST
 
 Device app **v0.6.0-depthfix** (repo `ae78f72`). The long-PARKED mixed-immersion blocky
