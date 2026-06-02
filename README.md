@@ -8,6 +8,12 @@ The first publicly-documented Godot `RigidBody3D` physics scene rendering in imm
 
 ![Cascade demo](captures/cascade.gif)
 
+## ▶️ Try it on Apple Vision Pro (TestFlight)
+
+**[Join the public beta → testflight.apple.com/join/bw1aeExJ](https://testflight.apple.com/join/bw1aeExJ)**
+
+No build required — install Apple's [TestFlight](https://apps.apple.com/app/testflight/id899247664) app on your Vision Pro, open the link above, and tap **Install**. Then launch **Cascade Countdown** from your Home View and put the headset on. (The rest of this README is for developers who want to build from source.)
+
 ## ⚠️ Which Godot engine you need (read this first)
 
 Hand tracking is an **engine capability, not a project setting** — no amount of GDScript or Info.plist tweaking enables it. There are two visionOS Godot engine paths and **they are not interchangeable**:
@@ -25,7 +31,7 @@ Hand tracking is an **engine capability, not a project setting** — no amount o
 
 Experimental WIP. Rendering rides on Apple's official visionOS contribution — [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot)'s `apple/visionos-xr` branch (PR open, not yet merged upstream; Ricardo Sanchez-Saez, Apple visionOS team, is lead author — see the [PR thread](https://github.com/godotengine/godot/pull/109975)). **Hand tracking** rides on [Clancey's fork](https://github.com/Clancey/godot/tree/visionos_master_pr), which rebases hand-interaction support on top — see [Which Godot engine you need](#️-which-godot-engine-you-need-read-this-first) above.
 
-Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26.
+Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26. **Live on [TestFlight](https://testflight.apple.com/join/bw1aeExJ)** (build 5, v0.9.0).
 
 - 90 FPS locked, **zero variance across a 95-second sample** (19 × 5-second windows)
 - ~475 physics collisions / 95s
