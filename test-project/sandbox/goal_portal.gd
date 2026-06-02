@@ -15,7 +15,20 @@ const RING_TUBE := 0.028
 var _ring_mat: StandardMaterial3D
 var _pulse := 0.0
 var _total_label: Label3D
+var _mult_label: Label3D
 var _running_total := 0
+
+# Goal-size difficulty multiplier. The portal is grabbable + two-hand scalable, so its
+# node scale is the difficulty dial: a SMALLER goal is harder to hit → bigger multiplier;
+# a BIGGER goal is easier → smaller multiplier. Inverse-proportional, clamped so it can
+# never trivialise or nullify a round.
+const MULT_MIN := 0.25
+const MULT_MAX := 4.0
+
+func score_multiplier() -> float:
+	var s := (scale.x + scale.y + scale.z) / 3.0
+	s = clampf(s, 0.1, 10.0)
+	return clampf(1.0 / s, MULT_MIN, MULT_MAX)
 
 func _ready() -> void:
 	# Grabbable but non-blocking: cubes (mask 1) ignore layer 2; hand handler
@@ -97,6 +110,20 @@ func _ready() -> void:
 	_total_label.position = Vector3(0.0, RING_RADIUS + 0.10, 0.0)
 	add_child(_total_label)
 
+	# Live difficulty-multiplier readout below the ring. Hidden at ~1.0x; appears when
+	# the player resizes the goal so they see the reward (smaller) or penalty (bigger).
+	_mult_label = Label3D.new()
+	_mult_label.text = ""
+	_mult_label.font_size = 84
+	_mult_label.outline_size = 12
+	_mult_label.modulate = Color(1.0, 0.85, 0.35)
+	_mult_label.outline_modulate = Color(0, 0, 0, 0.9)
+	_mult_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_mult_label.shaded = false
+	_mult_label.pixel_size = 0.0006
+	_mult_label.position = Vector3(0.0, -(RING_RADIUS + 0.07), 0.0)
+	add_child(_mult_label)
+
 func _on_throat_body_entered(body: Node3D) -> void:
 	if body.is_in_group("cube"):
 		_pulse = 1.0
@@ -117,3 +144,13 @@ func _process(delta: float) -> void:
 		_pulse = move_toward(_pulse, 0.0, delta * 3.0)
 		if _ring_mat:
 			_ring_mat.emission_energy_multiplier = 2.2 + _pulse * 6.0
+
+	# Keep the difficulty readout in sync with the current size. Show nothing near 1.0x;
+	# green when the goal is shrunk (bonus), red-orange when enlarged (penalty).
+	if _mult_label:
+		var m := score_multiplier()
+		if absf(m - 1.0) <= 0.05:
+			_mult_label.text = ""
+		else:
+			_mult_label.text = "x%.1f" % m
+			_mult_label.modulate = Color(0.45, 1.0, 0.5) if m > 1.0 else Color(1.0, 0.55, 0.35)

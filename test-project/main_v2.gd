@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.8.2-grabrevert"  # grab back to v0.1.8 centre-rides-pinch feel; keep button guardrails (manipulation gate + edge-triggered pokes)
+const APP_VERSION := "v0.9.0-scoring"  # longevity-weighted scoring, goal-size multiplier, spinner + prism shapes, hands never empty (3-state cycle)
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -42,6 +42,14 @@ const LAYER_GRAB_ONLY := 2
 # repeat hits on the same surface are ignored, so trapping a cube in a bounce
 # pocket earns nothing.
 const TIME_POINTS_PER_SEC := 6.0
+# Longevity is rewarded SUPERLINEARLY so the obvious "tight funnel → straight shot to
+# the goal" strategy (a cube that lives ~1 s) scores far less than a cube kept alive
+# and bouncing around the course. The per-second rate ramps up the longer a cube
+# survives; LONGEVITY_RAMP_SEC is roughly the age at which the rate doubles, and
+# LONGEVITY_MAX_SEC caps the effective age so a single trapped cube can't run away
+# with the whole round. See _on_portal_entered for the curve.
+const LONGEVITY_RAMP_SEC := 6.0
+const LONGEVITY_MAX_SEC := 15.0
 const SURFACE_BASE := 5
 const CHAIN_WINDOW_MS := 1500
 const CHAIN_MAX := 8
@@ -108,6 +116,8 @@ var _last_phys_log := 0
 # --- Sandbox state ---
 var _emitter: SpawnEmitter3D
 var _portal: GoalPortal3D
+var _spinner: PickupAbleBody3D  # constantly-rotating bar bumper (kept alive in _process)
+const SPINNER_RATE := 2.2      # rad/s
 var _grabbables: Array = []            # everything reset() returns home
 var _home_transforms: Dictionary = {}  # instance_id → Transform3D
 var _hand_handlers: Dictionary = {}    # side → PickupHandler3D
@@ -504,6 +514,32 @@ void fragment() {
 				Vector3(px, SPAWN_HEIGHT - 0.45, FORWARD_Z)),
 			Color(0.30, 0.55, 0.65))
 
+	# Spinning bar bumper — a long thin paddle that rotates continuously about Z,
+	# batting cubes sideways and keeping them in play (longevity ↑, anti-funnel).
+	# Placed mid-course, off-centre from the straight drop line. Rotated each frame
+	# in _process (it's a frozen KINEMATIC body, so moving its transform deflects).
+	var spin_mesh := BoxMesh.new()
+	spin_mesh.size = Vector3(0.42, 0.025, 0.05)
+	var spin_shape := BoxShape3D.new()
+	spin_shape.size = Vector3(0.42, 0.025, 0.05)
+	_spinner = _build_obstacle(spin_mesh, spin_shape,
+		Transform3D(Basis(), Vector3(0.12, PLATE_HEIGHT + 0.95, FORWARD_Z)),
+		Color(0.95, 0.45, 0.20))
+
+	# Prism wedge splitter — a triangular ridge high-centre that splits the falling
+	# stream left/right so cubes scatter instead of dropping in a single column.
+	var prism_mesh := PrismMesh.new()
+	prism_mesh.size = Vector3(0.34, 0.18, 0.22)
+	var prism_shape := ConvexPolygonShape3D.new()
+	prism_shape.points = PackedVector3Array([
+		Vector3(-0.17, -0.09, -0.11), Vector3(0.17, -0.09, -0.11),
+		Vector3(-0.17, -0.09, 0.11), Vector3(0.17, -0.09, 0.11),
+		Vector3(0.0, 0.09, -0.11), Vector3(0.0, 0.09, 0.11),
+	])
+	_build_obstacle(prism_mesh, prism_shape,
+		Transform3D(Basis(), Vector3(-0.05, SPAWN_HEIGHT - 0.75, FORWARD_Z)),
+		Color(0.40, 0.75, 0.55))
+
 	# Bubble transmuter — cubes passing through become spheres.
 	var bubble := BubbleTransmuter3D.new()
 	bubble.position = Vector3(0.25, PLATE_HEIGHT + 0.55, FORWARD_Z)
@@ -736,12 +772,11 @@ func _process(delta: float):
 				_reset_sandbox()
 				_gesture_cooldown = 1.0
 				break
-			elif pinched == 15:      # middle → toggle hand mesh
-				_hand_mesh_visible = not _hand_mesh_visible
-				for d in _hand_drivers:
-					d.set_shown(_hand_mesh_visible)
-				# Dissolve whoosh: descending on hide, ascending on show.
-				_push_sweep(900.0, 300.0, 0.22) if not _hand_mesh_visible else _push_sweep(300.0, 900.0, 0.22)
+			elif pinched == 15:      # middle → cycle hand visibility (mesh → both → real)
+				# Was a raw toggle of the mesh, which could leave BOTH mesh and real arms
+				# off → empty space (playtesters kept hitting this). Now shares the same
+				# 3-state cycle as the HANDS button, which can never show nothing.
+				_cycle_hands_mode()
 				_gesture_cooldown = 0.8
 				break
 			elif pinched == 25:      # pinky → toggle immersion / passthrough
@@ -756,6 +791,11 @@ func _process(delta: float):
 	_update_leaderboard(delta)
 	_update_destruct(delta)
 	_update_grab_sound()
+	# Keep the spinning bar bumper turning — but not while a player is grabbing it
+	# (the pickup handler owns its transform then; rotating it too would fight the grab).
+	if is_instance_valid(_spinner) and not _spinner.is_picked_up():
+		_spinner.rotate_z(SPINNER_RATE * delta)
+
 	_update_two_hand_scale()  # both hands pinch → scale world (handle) or held object
 	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
@@ -958,11 +998,19 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 		return
 	if not cube.is_in_group("cube"):
 		return
-	# Final score = time-alive trickle + accumulated chained surface points.
+	# Final score = SUPERLINEAR time-alive bonus + accumulated chained surface points,
+	# then scaled by how hard the goal is (smaller goal → bigger multiplier).
 	var birth: int = cube.get_meta("birth_ms", Time.get_ticks_msec())
 	var alive_s := float(Time.get_ticks_msec() - birth) / 1000.0
+	# Accelerating curve: rate grows with age, so a long-lived bouncer is worth much
+	# more than a quick straight-shot. Capped at LONGEVITY_MAX_SEC of effective age.
+	var eff_s := minf(alive_s, LONGEVITY_MAX_SEC)
+	var time_pts := TIME_POINTS_PER_SEC * eff_s * (1.0 + eff_s / LONGEVITY_RAMP_SEC)
 	var surface_pts: int = cube.get_meta("score_acc", 0)
-	var total := int(round(alive_s * TIME_POINTS_PER_SEC)) + surface_pts
+	var base_total := int(round(time_pts)) + surface_pts
+	# Goal-size difficulty multiplier (smaller = harder = more points).
+	var mult := _portal.score_multiplier() if is_instance_valid(_portal) else 1.0
+	var total := int(round(base_total * mult))
 	total = max(total, 1)
 
 	# Time-attack: tally toward the active round.
@@ -978,7 +1026,12 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 		_portal.add_to_total(total)
 	# Big cash-out uses the volumetric (extruded, non-billboard) popup so it
 	# stands apart from the flat multiplier popups. Small +N / xN stay flat.
-	BigScorePopup3D.spawn(self, at + Vector3(0, 0.05, 0), str(total), Color(0.55, 0.95, 1.0))
+	# Surface the goal-size multiplier in the popup when it isn't ~1.0 so the player
+	# sees the payoff (or penalty) for resizing the goal.
+	var popup_txt := str(total)
+	if absf(mult - 1.0) > 0.05:
+		popup_txt = "%d  (x%.1f)" % [total, mult]
+	BigScorePopup3D.spawn(self, at + Vector3(0, 0.05, 0), popup_txt, Color(0.55, 0.95, 1.0))
 	_spawn_burst(at, Color(0.40, 0.90, 1.0))
 	_push_score_fanfare()
 
@@ -1745,12 +1798,12 @@ func _load_arms_pref() -> void:
 	var v := f.get_as_text().strip_edges().to_lower()
 	f.close()
 	_real_arms_visible = (v == "visible")
-	# MESH hands and REAL arms are mutually exclusive modes — if a prior session left
-	# real arms on, start with the virtual mesh hidden so the two never overlap.
+	# If a prior session left real arms on, default the virtual mesh off so we restore
+	# REAL-only (not BOTH) — but _apply_hand_visibility still guarantees we never end up
+	# with nothing showing.
 	if _real_arms_visible:
 		_hand_mesh_visible = false
-		for d in _hand_drivers:
-			d.set_shown(false)
+	_apply_hand_visibility()
 
 # The HANDS button is a HANDS-MODE selector: it switches between virtual MESH
 # hands and real Persona ARMS (two different things, mutually exclusive) rather than
@@ -1758,14 +1811,19 @@ func _load_arms_pref() -> void:
 func _refresh_arms_label() -> void:
 	if _arms_button_label == null or _arms_button_mat == null:
 		return
-	if _real_arms_visible:
-		# Currently REAL arms → blue. Tapping switches to MESH.
-		_arms_button_label.text = "HANDS\nREAL ARMS"
+	# Three valid states (never "none"): MESH only / BOTH / REAL only. Label shows the
+	# CURRENT mode; tapping advances the cycle.
+	if _hand_mesh_visible and _real_arms_visible:
+		_arms_button_label.text = "HANDS\nBOTH"
+		_arms_button_mat.albedo_color = Color(0.16, 0.34, 0.42)
+		_arms_button_mat.emission = Color(0.55, 0.88, 1.0)
+		_arms_button_mat.emission_energy_multiplier = 1.3
+	elif _real_arms_visible:
+		_arms_button_label.text = "HANDS\nREAL"
 		_arms_button_mat.albedo_color = Color(0.12, 0.34, 0.50)
 		_arms_button_mat.emission = Color(0.30, 0.75, 1.0)
 		_arms_button_mat.emission_energy_multiplier = 1.2
 	else:
-		# Currently MESH hands → warm. Tapping switches to REAL arms.
 		_arms_button_label.text = "HANDS\nMESH"
 		_arms_button_mat.albedo_color = Color(0.30, 0.22, 0.10)
 		_arms_button_mat.emission = Color(0.95, 0.62, 0.20)
@@ -1805,14 +1863,29 @@ func _toggle_mute() -> void:
 # is always on, the other off — turning on mesh hands and turning on real arms are
 # genuinely DIFFERENT things, so this is a mode toggle, not an on/off.
 func _cycle_hands_mode() -> void:
-	_real_arms_visible = not _real_arms_visible
-	_hand_mesh_visible = not _real_arms_visible   # exactly one mode active
+	# 3-way cycle that can NEVER land on "no hands":
+	#   MESH only → BOTH → REAL only → (wrap) MESH only
+	if _hand_mesh_visible and not _real_arms_visible:
+		_real_arms_visible = true            # MESH → BOTH
+	elif _hand_mesh_visible and _real_arms_visible:
+		_hand_mesh_visible = false           # BOTH → REAL only
+	else:
+		_hand_mesh_visible = true            # REAL only (or any empty state) → MESH only
+		_real_arms_visible = false
+	_apply_hand_visibility()
+	_push_sweep(300.0, 900.0, 0.22)
+
+# Apply the current hand-visibility state, ENFORCING the invariant that at least one of
+# {virtual mesh hands, real Persona arms} is always visible. Playtesters kept toggling
+# into a state with neither and seeing empty space — this guard makes that unreachable.
+# Every path that changes hand visibility should end here.
+func _apply_hand_visibility() -> void:
+	if not _hand_mesh_visible and not _real_arms_visible:
+		_hand_mesh_visible = true   # never show nothing
 	for d in _hand_drivers:
 		d.set_shown(_hand_mesh_visible)
 	_write_arms_pref()
 	_refresh_arms_label()
-	# Ascending sweep = switching to real arms, descending = switching to mesh hands.
-	_push_sweep(300.0, 900.0, 0.22) if _real_arms_visible else _push_sweep(900.0, 300.0, 0.22)
 
 # Persist the real-arm preference; user://upper_limb.txt maps to Documents/upper_limb.txt,
 # which the recompiled engine polls (~0.5s) and applies to SwiftUI .upperLimbVisibility.
