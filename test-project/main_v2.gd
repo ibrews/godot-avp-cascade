@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.9.12-debugmodes"  # big DEBUG button cycles grab modes (FINGER+MED/WRIST/SMOOTH/RAW); world-handle drag dampening; telemetry on
+const APP_VERSION := "v0.9.22-responsive"  # kill the lag: removed the anchor glitch-gate (throttled fast drags to ~1/7) + responsive follow (pos 9Hz/rot 4Hz, ang clamp 18). DEBUG button toggles RESPONSIVE vs DAMPED
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -2318,9 +2318,9 @@ func _save_best() -> void:
 		f.store_line(str(_best_score))
 		f.close()
 
-# Big in-world DEBUG button to A/B the grab-follow approaches live. Poke CYCLE to advance
-# through PickupAbleBody3D.grab_mode (FINGER+MED / WRIST / SMOOTH / RAW); the readout shows the
-# active mode. Temporary tuning aid — removed once we lock the winning approach.
+# Big in-world DEBUG button to A/B the grab follow live. Poke CYCLE to toggle
+# PickupAbleBody3D.grab_mode (RESPONSIVE = snappy follow / DAMPED = heavy smoothing for poor
+# tracking); the readout shows the active mode. Temporary tuning aid.
 func _build_grabmode_debug() -> void:
 	var root := Node3D.new()
 	root.name = "GrabModeDebug"

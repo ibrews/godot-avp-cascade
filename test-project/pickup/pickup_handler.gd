@@ -23,6 +23,12 @@ class_name PickupHandler3D
 @export var pickup_release_threshold : float = 0.12
 @export var release_grace_msec : int = 180
 @export var quick_release_value : float = 0.04
+# A "clearly wide-open" pinch must STAY open this long before the quick release fires. A hand-
+# tracking burst splays the thumb-index estimate for 1-3 frames mid-grab (val 1.0 -> ~0 -> 1.0
+# in ~30-60 ms), which the telemetry caught dropping the grab and re-anchoring the object at a
+# new point. This debounce rejects those spikes; a real release stays open far longer. Any frame
+# back above the release threshold resets the timer, so an oscillating burst never accumulates.
+@export var quick_release_debounce_msec : int = 300
 @export var follow_fingertips : bool = true
 @export var hold_while_hand_tracking_uncertain : bool = true
 
@@ -76,6 +82,186 @@ func _gdiag(line: String) -> void:
 func _side() -> String:
 	var c := _get_parent_controller()
 	return str(c.tracker) if c != null else "?"
+
+
+# --- Pinch-side telemetry (grab_diag.txt) -------------------------------------------------
+# The follow side is already heavily logged (HOLD/slip_mm). This logs what the GRAB LATCH
+# sees per hand so we can catch "right hand can't grab": the pinch value vs the active
+# threshold, the RAW thumb-index distance (computed from positions even when a tip is only
+# VALID-not-TRACKED — which _get_pickup_value can't report because it returns 0.0 then),
+# per-joint VALID/TRACKED flags, and raw fingertip-midpoint jitter (mm/frame) for a direct
+# L-vs-R noise comparison. Strip with the rest of GRAB_DIAG for release.
+const PINCH_DIAG_PERIOD_MS := 100         # ~10 Hz idle sampling; press/release edges bypass it
+var _pinch_diag_last_ms : int = 0
+var _pinch_prev_raw_pressed : bool = false
+var _pinch_raw_mid_prev : Vector3 = Vector3.ZERO
+var _pinch_raw_mid_have : bool = false
+var _pinch_raw_mid_max_mm : float = 0.0   # max raw-midpoint delta seen this throttle window
+
+# Rigid-hand anchor (the fix) + its parallel jitter measurement. The telemetry proved the
+# thumb-index fingertip MIDPOINT is the noise source (~10-12 mm/frame jitter during a pinch,
+# BOTH hands — the tips occlude each other when pressed together), which no downstream filter
+# can clean. During a firm grab the hand is ~rigid, so we capture the pinch point in the WRIST
+# joint's frame at grab and reconstruct it from the live (stable) wrist each frame: same
+# location, far stabler source. grab_mode 0 = RIGID (this), 1 = FINGER (old midpoint) for A/B.
+# _pinch_rigid_* measure the rigid anchor's jitter EVERY run so the log compares both sources
+# regardless of the active mode.
+var _grab_anchor_offset : Vector3 = Vector3.ZERO   # pinch point in wrist-local frame at grab
+var _have_grab_anchor_offset : bool = false
+var _pinch_rigid_prev : Vector3 = Vector3.ZERO
+var _pinch_rigid_have : bool = false
+var _pinch_rigid_max_mm : float = 0.0
+
+# Glitch-gate (grab_mode 0 only). The telemetry showed the right hand throws frequent MULTI-
+# frame bursts where the whole-hand pose teleports >4 m/s while the hand is ~stationary (24% of
+# frames vs 0% on the left, motion identical) — beyond what the median-of-3 or the body speed-
+# clamp clean up. So while holding we HOLD the last-good anchor through an implausible jump
+# (> GLITCH_MAX_STEP_M in one render frame) for up to GLITCH_MAX_HOLD frames, then accept it (a
+# genuine sustained move). Clean frames pass untouched → no added lag.
+const GLITCH_MAX_STEP_M := 0.045   # ~4 m/s @ 90 Hz single-frame jump = implausible for a held hand
+const GLITCH_MAX_HOLD := 6         # accept after this many held frames (real move, not a glitch)
+var _gate_last_good : Vector3 = Vector3.ZERO
+var _gate_have : bool = false
+var _gate_hold_count : int = 0
+
+# Sticky-release stability signal: a leaky-max of the active anchor's per-frame jump (mm). High =
+# the hand is poorly observed (jumping / going out of view), so its pinch-open signal can't be
+# trusted to mean "released" — hold the grab instead. Maintained EVERY frame (not gated by
+# diagnostics — the release gate below depends on it).
+const JITTER_DECAY := 0.88           # per physics frame (~60 Hz) → a spike decays over ~150 ms
+const STABLE_JITTER_MM := 28.0       # recent jitter under this = hand observed well enough to act on a release
+const RELEASE_FALLBACK_MSEC := 2500  # open+degraded this long still releases (can't get permanently stuck)
+var _recent_jitter_mm : float = 0.0
+
+# Compact joint-confidence tag: "VT" valid+tracked, "V-" valid only (estimated/low-confidence),
+# "--" neither. The right-hand "can't grab" theory: index/thumb tips read "V-" under occlusion,
+# and _get_pickup_value returns 0 in that case -> no pinch -> no grab, with nothing else logging it.
+func _joint_flag_tag(hand_tracker: XRHandTracker, joint: int) -> String:
+	var flags := int(hand_tracker.get_hand_joint_flags(joint))
+	var v := (flags & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) != 0
+	var t := (flags & XRHandTracker.HAND_JOINT_FLAG_POSITION_TRACKED) != 0
+	return ("V" if v else "-") + ("T" if t else "-")
+
+# Raw thumb-index fingertip midpoint in TRACKING space, or null if either tip isn't VALID.
+func _raw_fingertip_mid(hand_tracker: XRHandTracker):
+	if hand_tracker == null or not hand_tracker.get_has_tracking_data():
+		return null
+	var idx := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+	var thb := XRHandTracker.HAND_JOINT_THUMB_TIP
+	var iv := (int(hand_tracker.get_hand_joint_flags(idx)) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) != 0
+	var tv := (int(hand_tracker.get_hand_joint_flags(thb)) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) != 0
+	if not (iv and tv):
+		return null
+	return (hand_tracker.get_hand_joint_transform(idx).origin + hand_tracker.get_hand_joint_transform(thb).origin) * 0.5
+
+# Capture the pinch point in the wrist's local frame at grab (from the handler's CURRENT
+# de-spiked anchor, so the rigid point coincides exactly with what the body grabbed → no jump).
+func _capture_grab_anchor() -> void:
+	_have_grab_anchor_offset = false
+	var ht := _get_hand_tracker()
+	if ht == null or not _joint_has_tracked_position(ht, XRHandTracker.HAND_JOINT_WRIST):
+		return
+	var anchor_tracking := _origin_xform().affine_inverse() * global_transform.origin
+	var w := ht.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST)
+	_grab_anchor_offset = w.affine_inverse() * anchor_tracking
+	_have_grab_anchor_offset = true
+
+# The RIGID anchor (TRACKING space): the captured pinch point carried by the live wrist
+# transform. null if unavailable (no capture / wrist not tracked) → caller uses the fingertip.
+func _rigid_anchor(hand_tracker: XRHandTracker):
+	if not _have_grab_anchor_offset or hand_tracker == null:
+		return null
+	if not _joint_has_tracked_position(hand_tracker, XRHandTracker.HAND_JOINT_WRIST):
+		return null
+	return hand_tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST) * _grab_anchor_offset
+
+# Hold the last-good anchor through an implausible single-frame jump (a tracking burst), for up
+# to GLITCH_MAX_HOLD frames; then accept it (a real sustained move). Returns the anchor to use.
+func _glitch_gate(p: Vector3) -> Vector3:
+	if not _gate_have:
+		_gate_last_good = p
+		_gate_have = true
+		_gate_hold_count = 0
+		return p
+	if (p - _gate_last_good).length() > GLITCH_MAX_STEP_M and _gate_hold_count < GLITCH_MAX_HOLD:
+		_gate_hold_count += 1
+		if _gate_hold_count == 1:
+			_gdiag("GLITCH %s step_mm=%.1f (hold)" % [_side(), (p - _gate_last_good).length() * 1000.0])
+		return _gate_last_good   # reject this frame: hold the last good anchor
+	_gate_last_good = p
+	_gate_hold_count = 0
+	return p
+
+# Sample the raw fingertip-midpoint AND the rigid anchor every physics frame, tracking each
+# one's max per-frame jump this throttle window (a jitter measure that survives the 10 Hz log
+# throttle). Both in TRACKING space. rigid is only present while holding (offset captured).
+func _sample_mid_jitter() -> void:
+	var ht := _get_hand_tracker()
+	var jf := -1.0   # this-frame jump (mm) of the active anchor; -1 = no sample to add
+	var mid = _raw_fingertip_mid(ht)
+	if mid == null:
+		_pinch_raw_mid_have = false
+	else:
+		if _pinch_raw_mid_have:
+			var d := ((mid as Vector3) - _pinch_raw_mid_prev).length() * 1000.0
+			_pinch_raw_mid_max_mm = maxf(_pinch_raw_mid_max_mm, d)
+			jf = d
+		_pinch_raw_mid_prev = mid
+		_pinch_raw_mid_have = true
+	var rigid = _rigid_anchor(ht)
+	if rigid == null:
+		_pinch_rigid_have = false
+	else:
+		if _pinch_rigid_have:
+			var dr := ((rigid as Vector3) - _pinch_rigid_prev).length() * 1000.0
+			_pinch_rigid_max_mm = maxf(_pinch_rigid_max_mm, dr)
+			jf = dr   # while holding, the wrist-rigid anchor is the one we follow → use it for stability
+		_pinch_rigid_prev = rigid
+		_pinch_rigid_have = true
+	# Leaky-max recent jitter (rises with any jump, decays over ~150 ms) — the sticky-release gate.
+	if jf >= 0.0:
+		_recent_jitter_mm = maxf(jf, _recent_jitter_mm * JITTER_DECAY)
+	else:
+		_recent_jitter_mm *= JITTER_DECAY
+
+# "Is the hand observed well enough to TRUST a pinch-open as a real release?" Pinch joints must be
+# tracked, no anchor glitch in progress, and recent jitter low. When false (hand jumping / out of
+# view), the release logic holds the grab instead of dropping it on a degraded signal.
+func _hand_well_observed() -> bool:
+	var ht := _get_hand_tracker()
+	if ht == null or not ht.get_has_tracking_data():
+		return false
+	if not (_joint_has_tracked_position(ht, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP) and _joint_has_tracked_position(ht, XRHandTracker.HAND_JOINT_THUMB_TIP)):
+		return false
+	if _gate_hold_count > 0:
+		return false
+	return _recent_jitter_mm <= STABLE_JITTER_MM
+
+# Emit one PINCH line. raw_pressed = the unmutated (pre-grace) threshold decision the latch
+# made this frame; edge = "press"/"release"/"-". Resets the jitter accumulator after logging.
+func _pinch_diag(pickup_value: float, threshold: float, raw_pressed: bool, edge: String) -> void:
+	if not GRAB_DIAG:
+		return
+	var dist_mm := -1.0
+	var idx_tag := "??"
+	var thb_tag := "??"
+	var wr_tag := "??"
+	var ht := _get_hand_tracker()
+	if ht != null and ht.get_has_tracking_data():
+		var idx := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+		var thb := XRHandTracker.HAND_JOINT_THUMB_TIP
+		idx_tag = _joint_flag_tag(ht, idx)
+		thb_tag = _joint_flag_tag(ht, thb)
+		wr_tag = _joint_flag_tag(ht, XRHandTracker.HAND_JOINT_WRIST)
+		var idx_valid := (int(ht.get_hand_joint_flags(idx)) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) != 0
+		var thb_valid := (int(ht.get_hand_joint_flags(thb)) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) != 0
+		if idx_valid and thb_valid:
+			dist_mm = ht.get_hand_joint_transform(idx).origin.distance_to(ht.get_hand_joint_transform(thb).origin) * 1000.0
+	_gdiag("PINCH %s val=%.2f thr=%.2f press=%d held=%d dist_mm=%.1f idx=%s thb=%s wr=%s midjit_mm=%.1f rigidjit_mm=%.1f recjit_mm=%.1f obs=%d edge=%s" % [
+		_side(), pickup_value, threshold, int(raw_pressed), int(picked_up_body != null),
+		dist_mm, idx_tag, thb_tag, wr_tag, _pinch_raw_mid_max_mm, _pinch_rigid_max_mm, _recent_jitter_mm, int(_hand_well_observed()), edge])
+	_pinch_raw_mid_max_mm = 0.0
+	_pinch_rigid_max_mm = 0.0
 
 
 # Reads a normalized pickup value from whichever input naming convention
@@ -178,64 +364,79 @@ func _update_anchor_from_hand_tracker() -> void:
 	var thumb_joint := XRHandTracker.HAND_JOINT_THUMB_TIP
 	var has_index := _joint_has_tracked_position(hand_tracker, index_joint)
 	var has_thumb := _joint_has_tracked_position(hand_tracker, thumb_joint)
-	if not has_index and not has_thumb:
-		return
-
-	var target_position := Vector3.ZERO
-	var new_src := "none"
+	# Fingertip midpoint when visible (null if neither tip is tracked). Used as the anchor when
+	# NOT holding (reach/proximity) and as the fallback while holding if the wrist is unavailable.
+	var fingertip_mid = null
+	var new_src := anchor_src
 	if has_index and has_thumb:
 		var index_tip := hand_tracker.get_hand_joint_transform(index_joint).origin
 		var thumb_tip := hand_tracker.get_hand_joint_transform(thumb_joint).origin
-		target_position = (index_tip + thumb_tip) * 0.5
+		fingertip_mid = (index_tip + thumb_tip) * 0.5
 		# Record the midpoint relative to each tip so we can hold it if one drops next frame.
-		_mid_from_index = target_position - index_tip
-		_mid_from_thumb = target_position - thumb_tip
+		_mid_from_index = fingertip_mid - index_tip
+		_mid_from_thumb = fingertip_mid - thumb_tip
 		_have_mid_offsets = true
 		new_src = "both"
 	elif has_index:
 		# Only the index is tracked: reconstruct the midpoint from the last offset instead of
 		# snapping the anchor onto the bare fingertip (continuity across the flicker).
 		var index_tip := hand_tracker.get_hand_joint_transform(index_joint).origin
-		target_position = index_tip + (_mid_from_index if _have_mid_offsets else Vector3.ZERO)
+		fingertip_mid = index_tip + (_mid_from_index if _have_mid_offsets else Vector3.ZERO)
 		new_src = "index"
-	else:
+	elif has_thumb:
 		var thumb_tip := hand_tracker.get_hand_joint_transform(thumb_joint).origin
-		target_position = thumb_tip + (_mid_from_thumb if _have_mid_offsets else Vector3.ZERO)
+		fingertip_mid = thumb_tip + (_mid_from_thumb if _have_mid_offsets else Vector3.ZERO)
 		new_src = "thumb"
-	# Log anchor-source changes while holding — catches the tracking flicker that used to lurch
-	# the grab point (both → index/thumb → both).
+
+	# Pick the RAW anchor. While HOLDING: prefer the wrist-carried grab point — it keeps following
+	# the hand even when BOTH fingertips drop out of sight (carry the object with whatever's
+	# visible); fall back to the fingertip midpoint, then to holding the last anchor (never
+	# snap/drop). When NOT holding: the fingertip midpoint, else hold. We never re-capture the grab
+	# offset mid-hold, so the grab point auto-"snaps back" when the pinch returns into view.
+	var raw_anchor := Vector3.ZERO
+	if picked_up_body != null:
+		var rigid = _rigid_anchor(hand_tracker)
+		if rigid != null:
+			raw_anchor = rigid
+			if fingertip_mid == null:
+				new_src = "wrist"
+		elif fingertip_mid != null:
+			raw_anchor = fingertip_mid
+		else:
+			return   # holding but nothing tracked — hold the last anchor, don't drop
+	elif fingertip_mid != null:
+		raw_anchor = fingertip_mid
+	else:
+		return   # not holding and no fingertips — nothing to track
+
+	# Log anchor-source changes while holding.
 	if new_src != anchor_src:
 		if picked_up_body != null:
 			_gdiag("ANCHORSRC %s %s->%s" % [_side(), anchor_src, new_src])
 		anchor_src = new_src
 
-	# De-spike: median-of-3 of the raw anchor kills isolated single-frame fingertip jumps
-	# (the telemetry's "anchor teleports 8 cm at 1 m/s" spikes) with ~zero lag on real motion.
-	_anchor_hist.push_back(target_position)
+	# De-spike: median-of-3 of the SELECTED anchor kills ISOLATED single-frame jumps with ~zero
+	# lag on real motion. (Earlier bug: RIGID overrode the anchor AFTER this, bypassing it — so
+	# the rigid anchor had no spike protection. Now we de-spike whichever source we use.)
+	_anchor_hist.push_back(raw_anchor)
 	if _anchor_hist.size() > 3:
 		_anchor_hist.pop_front()
-	var despiked := target_position
+	var despiked := raw_anchor
 	if _anchor_hist.size() == 3:
 		despiked = Vector3(
 			_median3(_anchor_hist[0].x, _anchor_hist[1].x, _anchor_hist[2].x),
 			_median3(_anchor_hist[0].y, _anchor_hist[1].y, _anchor_hist[2].y),
 			_median3(_anchor_hist[0].z, _anchor_hist[1].z, _anchor_hist[2].z))
 		if picked_up_body != null:
-			var rej := (target_position - despiked).length() * 1000.0
+			var rej := (raw_anchor - despiked).length() * 1000.0
 			if rej > 15.0:
 				_gdiag("DESPIKE %s rejected_mm=%.1f" % [_side(), rej])
 
-	# Choose the anchor POSITION per the live A/B grab mode (cycled by the in-world debug
-	# button). WRIST mode is the key experiment: anchoring on the wrist joint instead of the
-	# fingertips dodges the multi-frame occlusion bursts the telemetry showed when a held plate
-	# blocks the fingers from the cameras. SMOOTH/RAW use the raw fingertip (body filter differs).
+	# Use the de-spiked anchor directly. (A glitch-gate that HELD the anchor through multi-frame
+	# jumps throttled real fast drags/flicks to ~1/7 speed — the "takes a second to catch up" lag —
+	# because sustained fast motion reads as one long "glitch". The median de-spike above + the
+	# body's speed clamp reject true spikes WITHOUT throttling sustained motion.)
 	var anchor_pos := despiked
-	match PickupAbleBody3D.grab_mode:
-		1:  # WRIST
-			if _joint_has_tracked_position(hand_tracker, XRHandTracker.HAND_JOINT_WRIST):
-				anchor_pos = hand_tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST).origin
-		2, 3:  # SMOOTH / RAW
-			anchor_pos = target_position
 
 	# target_position is TRACKING-space (XROrigin-relative); render it through the origin
 	# so the grab anchor (and the held body riding it) stays on the real hand after a
@@ -320,6 +521,10 @@ func _get_parent_controller() -> XRController3D:
 func _ready() -> void:
 	_update_detect_range()
 	_update_closest_body()
+	# One-time pinch config dump so grab_diag is self-describing (thresholds + pinch-distance ramp).
+	_gdiag("PINCHCFG %s press_thr=%.2f rel_thr=%.2f quick_rel=%.3f pinch_grab=%.3f pinch_rel=%.3f detect=%.3f" % [
+		_side(), pickup_press_threshold, pickup_release_threshold, quick_release_value,
+		HAND_PINCH_GRAB, HAND_PINCH_RELEASE, detect_range])
 
 
 # Anchor re-pin MUST run at render rate (90 Hz), NOT physics rate (60 Hz). The held
@@ -343,49 +548,76 @@ func _physics_process(delta) -> void:
 	# Check if our pickup action is true
 	var pickup_pressed = false
 	var pickup_value : float = 0.0
+	var threshold : float = pickup_press_threshold
 	var controller : XRController3D = _get_parent_controller()
 	if controller:
 		# While OpenXR can return this as a boolean, there is a lot of
 		# difference in handling thresholds between platforms.
 		# So we implement our own logic here.
 		pickup_value = _get_pickup_value(controller)
-		var threshold : float = pickup_release_threshold if was_pickup_pressed else pickup_press_threshold
+		threshold = pickup_release_threshold if was_pickup_pressed else pickup_press_threshold
 		pickup_pressed = pickup_value > threshold
+
+	# Maintain the recent-jitter stability signal EVERY frame (the sticky-release gate depends on
+	# it — this is production logic, not diagnostics).
+	if controller:
+		_sample_mid_jitter()
+
+	# Pinch telemetry: emit a throttled PINCH line (~10 Hz) and ALWAYS on a raw press/release edge,
+	# so a missed-grab attempt can't slip between samples. raw_pressed is the unmutated threshold
+	# decision (before the grace/hold latch logic below can force pickup_pressed back to true).
+	if GRAB_DIAG and controller:
+		var raw_pressed := pickup_value > threshold
+		var edge := "-"
+		if raw_pressed and not _pinch_prev_raw_pressed:
+			edge = "press"
+		elif not raw_pressed and _pinch_prev_raw_pressed:
+			edge = "release"
+		var now_ms := Time.get_ticks_msec()
+		if edge != "-" or now_ms - _pinch_diag_last_ms >= PINCH_DIAG_PERIOD_MS:
+			_pinch_diag(pickup_value, threshold, raw_pressed, edge)
+			_pinch_diag_last_ms = now_ms
+		_pinch_prev_raw_pressed = raw_pressed
 
 	# Do we need to let go?
 	if picked_up_body:
 		if pickup_pressed:
 			release_started_msec = 0
 		else:
-			var can_evaluate_release := true
-			if hold_while_hand_tracking_uncertain and controller:
-				can_evaluate_release = _has_confident_hand_release_signal(controller)
-
-			if not can_evaluate_release:
-				# Keep latch engaged until we have enough confidence to evaluate release intent.
+			# STICKY RELEASE: never drop the grab on degraded/lost tracking. Release only on a
+			# CONFIDENT open — fingers clearly open, SUSTAINED, AND the hand currently well-observed
+			# (pinch joints tracked, low recent jitter, no glitch in progress). If the hand is poorly
+			# observed (jumping / out of view), HOLD: the wrist anchor keeps carrying the object and
+			# the grab point is retained, so the pinch "snaps back" when it returns. A long fallback
+			# still guarantees a release can't get permanently stuck. Any frame back above the
+			# release threshold reset release_started_msec above, so an oscillating burst never
+			# accumulates toward a release.
+			var well_observed := (not hold_while_hand_tracking_uncertain) or _hand_well_observed()
+			var now_msec := Time.get_ticks_msec()
+			if release_started_msec == 0:
+				release_started_msec = now_msec
+			var held_open_ms := now_msec - release_started_msec
+			var quick := pickup_value <= quick_release_value and held_open_ms >= quick_release_debounce_msec
+			var graced := held_open_ms >= release_grace_msec
+			var fallback := held_open_ms >= RELEASE_FALLBACK_MSEC
+			if (well_observed and (quick or graced)) or fallback:
+				var how := ("fallback" if (fallback and not (well_observed and (quick or graced))) else ("quick" if quick else "grace"))
+				_gdiag("RELEASE %s obj=%s#%d (%s)" % [_side(), picked_up_body.name, picked_up_body.get_instance_id(), how])
+				picked_up_body.let_go()
+				picked_up_body = null
+				_have_grab_anchor_offset = false
+				_gate_have = false
 				release_started_msec = 0
-				pickup_pressed = true
+				was_pickup_pressed = false
+				return
 			else:
+				# Hold the latch (sticky / debounce / grace) — the object stays attached and keeps
+				# wrist-following, so this absorbs a finger-splay with no detach/blip. Log every
+				# wide-open hold (obs distinguishes a wrist-instability hold from a finger-splay
+				# hold) so we can measure how long the splays actually persist.
+				pickup_pressed = true
 				if pickup_value <= quick_release_value:
-					_gdiag("RELEASE %s obj=%s#%d (quick)" % [_side(), picked_up_body.name, picked_up_body.get_instance_id()])
-					picked_up_body.let_go()
-					picked_up_body = null
-					release_started_msec = 0
-					was_pickup_pressed = false
-					return
-
-				var now_msec := Time.get_ticks_msec()
-				if release_started_msec == 0:
-					release_started_msec = now_msec
-
-				if now_msec - release_started_msec >= release_grace_msec:
-					_gdiag("RELEASE %s obj=%s#%d (grace)" % [_side(), picked_up_body.name, picked_up_body.get_instance_id()])
-					picked_up_body.let_go()
-					picked_up_body = null
-					release_started_msec = 0
-				else:
-					# Keep latch engaged while within grace window.
-					pickup_pressed = true
+					_gdiag("STICKYHOLD %s val=%.2f open_ms=%d obs=%d jit=%.1f" % [_side(), pickup_value, held_open_ms, int(well_observed), _recent_jitter_mm])
 	else:
 		release_started_msec = 0
 
@@ -393,7 +625,8 @@ func _physics_process(delta) -> void:
 	if not picked_up_body and not was_pickup_pressed and pickup_pressed and closest_body:
 		picked_up_body = closest_body
 		picked_up_body.pick_up(self)
-		_gdiag("PICKUP %s obj=%s#%d at=%s" % [_side(), picked_up_body.name, picked_up_body.get_instance_id(), str(picked_up_body.global_position)])
+		_capture_grab_anchor()
+		_gdiag("PICKUP %s obj=%s#%d at=%s rigid=%d" % [_side(), picked_up_body.name, picked_up_body.get_instance_id(), str(picked_up_body.global_position), int(_have_grab_anchor_offset)])
 		_blocked_logged = false
 	# Diagnostic: pinching hard, nothing grabbed, but a held body is right here = the
 	# "I'm pinching but can't grab it" case (object held by the other hand).
