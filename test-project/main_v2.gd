@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.9.0-scoring"  # longevity-weighted scoring, goal-size multiplier, spinner + prism shapes, hands never empty (3-state cycle)
+const APP_VERSION := "v0.9.12-debugmodes"  # big DEBUG button cycles grab modes (FINGER+MED/WRIST/SMOOTH/RAW); world-handle drag dampening; telemetry on
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -53,6 +53,10 @@ const LONGEVITY_MAX_SEC := 15.0
 const SURFACE_BASE := 5
 const CHAIN_WINDOW_MS := 1500
 const CHAIN_MAX := 8
+# Mix bonus: scoring a goal of the OPPOSITE type to the last one (cube after sphere, or
+# sphere after cube) adds this flat bonus. Encourages landing BOTH cubes and spheres
+# rather than funneling everything through the bubble transmuter into spheres.
+const MIX_BONUS := 25
 
 # Fire-plasma palette — warm tones + contrast pops for mixed-mode variety.
 const CUBE_PALETTE := [
@@ -116,8 +120,7 @@ var _last_phys_log := 0
 # --- Sandbox state ---
 var _emitter: SpawnEmitter3D
 var _portal: GoalPortal3D
-var _spinner: PickupAbleBody3D  # constantly-rotating bar bumper (kept alive in _process)
-const SPINNER_RATE := 2.2      # rad/s
+var _spinners: Array = []      # [{node: PickupAbleBody3D, axis: Vector3, rate: float}] — spun in _physics_process when not held
 var _grabbables: Array = []            # everything reset() returns home
 var _home_transforms: Dictionary = {}  # instance_id → Transform3D
 var _hand_handlers: Dictionary = {}    # side → PickupHandler3D
@@ -131,6 +134,8 @@ var _scale_pivot := Vector3.ZERO  # held object's position frozen at engage
 var _scale_active := false
 var _scale_is_world := false
 var _scale_target: Node3D = null
+var _scale_lost_frames := 0   # debounce: brief one-pinch flicker shouldn't end a scale
+const SCALE_END_GRACE := 4    # frames a pinch may be missing before the scale truly ends
 var _scale_A0 := Vector3.ZERO   # world pinch points (L,R) at engage — object case
 var _scale_B0 := Vector3.ZERO
 var _scale_WA := Vector3.ZERO   # world points under the pinches at engage — world case
@@ -167,6 +172,9 @@ var _world_root: Node3D            # all course objects + spawned cubes live her
 var _scene_handle: SceneHandle3D
 var _handle_held_side := ""        # "", "left_hand", or "right_hand"
 var _handle_prev_pinch = null      # Vector3 or null; holder hand's last pinch pos
+var _handle_filt_delta := Vector3.ZERO   # smoothed world-drag delta (a little dampening)
+const HANDLE_DAMP_ALPHA := 0.45    # 0..1 — lower = more dampening on the world-handle drag
+var _grabmode_label: Label3D       # big debug button's mode readout
 var _world_scale_start_dist := 0.0
 var _world_scale_start_scale := Vector3.ONE
 var _world_scale_pivot := Vector3.ZERO  # captured ONCE at scale engage (stable)
@@ -205,6 +213,9 @@ var _timer_active := false
 var _timer_remaining := 0.0
 var _round_score := 0
 var _best_score := 0
+# Type of the last object scored in the goal: -1 none yet, 0 cube, 1 sphere. Drives the
+# MIX_BONUS (awarded when the next goal is the opposite type). Reset at round start.
+var _last_goal_sphere := -1
 # All six buttons now live on the unified control panel (_build_control_panel) and share
 # the poke-button registry. These handles point at the relevant registry entries' label/
 # material/node so the bespoke per-frame logic (round countdown/pulse + label refreshers)
@@ -246,6 +257,12 @@ var _destruct_cooldown := 0.0
 const MIN_GRAB_SIDE := 0.10
 
 func _ready():
+	# Fresh grab telemetry each launch (truncate). See _gdiag / GRAB_DIAG.
+	if GRAB_DIAG:
+		var gf := FileAccess.open("user://grab_diag.txt", FileAccess.WRITE)
+		if gf != null:
+			gf.store_line("# grab_diag — %s — GRABBED/LETGO/HOLD(slip_mm)/ANCHORSRC/GRAB_BLOCKED/SCALE_*" % APP_VERSION)
+			gf.close()
 	var interface = XRServer.find_interface("visionOS")
 	if interface and interface.initialize():
 		print("[Sandbox] visionOS XR initialized OK")
@@ -288,6 +305,7 @@ func _ready():
 	_build_control_panel()   # ONE panel: HANDS/START/MUTE/GESTURES/SKY/RESET + BEST readout
 	_build_leaderboard_panel()
 	_build_instructions_panel()
+	_build_grabmode_debug()
 	_fetch_leaderboard()
 	# Launch into immersive (opaque sky) by default, not mixed.
 	_immersive = true
@@ -385,6 +403,47 @@ func _build_obstacle(mesh: Mesh, shape: Shape3D, xform: Transform3D, color: Colo
 	_world_root.add_child(ob)
 	_register_grabbable(ob)
 	return ob
+
+# A continuously-spinning bar bumper, built as a grabbable PickupAbleBody3D. It spins in
+# _physics_process (so the kinematic move is solver-aligned and bats cubes cleanly, not the
+# render-frame teleport that flung them before) but ONLY while NOT held — grab it and it
+# freezes in your hand, release it and it resumes. The bar's long axis (X) is perpendicular
+# to its spin axis so it actually sweeps. No decorative hub: place it so it rotates from the
+# centre of existing geometry (a blue peg) and that cylinder reads as the axle. Group
+# "obstacle" so cube hits score; LAYER_SOLID so cubes bounce off it and the hand can grab it.
+func _build_spinner(pos: Vector3, axis: Vector3, rate: float, color: Color) -> void:
+	var bar := PickupAbleBody3D.new()
+	bar.collision_layer = LAYER_SOLID
+	bar.collision_mask = LAYER_SOLID
+	bar.freeze = true
+	bar.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	bar.freeze_on_release = true
+	bar.add_to_group("obstacle")
+	bar.physics_material_override = _physics_material
+	bar.position = pos
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 1.0
+	# Paddle bar (long axis = X, perpendicular to the spin axis so it actually sweeps).
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.40, 0.03, 0.05)
+	mi.mesh = bm
+	mi.material_override = mat
+	bar.add_child(mi)
+	var cs := CollisionShape3D.new()
+	var bs := BoxShape3D.new()
+	bs.size = Vector3(0.40, 0.03, 0.05)
+	cs.shape = bs
+	bar.add_child(cs)
+	# No decorative axle — the spinner is meant to be placed so it rotates from the centre
+	# of EXISTING course geometry (e.g. a blue peg cylinder), which reads as the axle.
+	_world_root.add_child(bar)
+	_register_grabbable(bar)
+	_spinners.append({"node": bar, "axis": axis.normalized(), "rate": rate})
 
 func _build_static_scene():
 	# WorldRoot holds the entire course + spawned cubes. The scene handle moves
@@ -514,17 +573,19 @@ void fragment() {
 				Vector3(px, SPAWN_HEIGHT - 0.45, FORWARD_Z)),
 			Color(0.30, 0.55, 0.65))
 
-	# Spinning bar bumper — a long thin paddle that rotates continuously about Z,
-	# batting cubes sideways and keeping them in play (longevity ↑, anti-funnel).
-	# Placed mid-course, off-centre from the straight drop line. Rotated each frame
-	# in _process (it's a frozen KINEMATIC body, so moving its transform deflects).
-	var spin_mesh := BoxMesh.new()
-	spin_mesh.size = Vector3(0.42, 0.025, 0.05)
-	var spin_shape := BoxShape3D.new()
-	spin_shape.size = Vector3(0.42, 0.025, 0.05)
-	_spinner = _build_obstacle(spin_mesh, spin_shape,
-		Transform3D(Basis(), Vector3(0.12, PLATE_HEIGHT + 0.95, FORWARD_Z)),
-		Color(0.95, 0.45, 0.20))
+	# Two spinning bar bumpers — paddles on axle hubs that rotate continuously, batting
+	# cubes around and keeping them in play (longevity ↑, anti-funnel). Each spins on a
+	# DIFFERENT axis, and the bar's long axis (X) is perpendicular to its spin axis so it
+	# actually sweeps. Grabbable: freeze in your hand, resume on release (see _build_spinner).
+	# Orange paddle mounted on the LEFT blue peg (same centre) so it rotates from inside that
+	# cylinder — the peg reads as its axle (spins about Z, the peg's own axis). Meaningful
+	# intersection with existing geometry, per request.
+	_build_spinner(Vector3(-0.2, SPAWN_HEIGHT - 0.45, FORWARD_Z), Vector3(0, 0, 1), 2.0,
+		Color(0.95, 0.45, 0.20))   # vertical paddle, sweeps the XY plane (faces user)
+	# Pink blade sits directly under the bubble transmuter (same x,z as the bubble at 0.25 /
+	# FORWARD_Z; height unchanged) so cubes dropping out of the bubble meet it.
+	_build_spinner(Vector3(0.25, PLATE_HEIGHT + 0.28, FORWARD_Z), Vector3(0, 1, 0), 2.4,
+		Color(0.95, 0.30, 0.55))   # horizontal blade, sweeps the XZ plane (helicopter-style)
 
 	# Prism wedge splitter — a triangular ridge high-centre that splits the falling
 	# stream left/right so cubes scatter instead of dropping in a single column.
@@ -706,7 +767,7 @@ func _build_info_panel() -> void:
 	cs.position = Vector3(0.0, center_y, 0.0)
 	root.add_child(cs)
 	_register_grabbable(root)
-	_attach_destruct_button(root, Vector3(0.0, center_y - size_y * 0.5 - 0.045, 0.0))
+	_attach_destruct_button(root, Vector3(0.0, center_y - size_y * 0.5 - 0.018, 0.0))
 
 # A billboard-free Label3D for the info panel (the panel faces the camera as a unit).
 func _panel_label(txt: String, fsize: int, col: Color, outline: int) -> Label3D:
@@ -745,8 +806,15 @@ func _update_info_panel(delta: float) -> void:
 	_info_panel_t += delta
 	_info_accent_mat.emission_energy_multiplier = 1.0 + 0.5 * (0.5 + 0.5 * sin(_info_panel_t * 2.0))
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
 	_phys_frame_count += 1
+	# Spin the bar bumpers in the physics step (solver-aligned kinematic move → cubes are
+	# batted cleanly). Skip any spinner that's currently GRABBED: the pickup handler owns its
+	# transform then, so it freezes in the hand and resumes spinning on release.
+	for s in _spinners:
+		var bar: PickupAbleBody3D = s["node"]
+		if is_instance_valid(bar) and not bar.is_picked_up():
+			bar.rotate(s["axis"], s["rate"] * delta)
 
 func _process(delta: float):
 	_frame_count += 1
@@ -791,11 +859,6 @@ func _process(delta: float):
 	_update_leaderboard(delta)
 	_update_destruct(delta)
 	_update_grab_sound()
-	# Keep the spinning bar bumper turning — but not while a player is grabbing it
-	# (the pickup handler owns its transform then; rotating it too would fight the grab).
-	if is_instance_valid(_spinner) and not _spinner.is_picked_up():
-		_spinner.rotate_z(SPINNER_RATE * delta)
-
 	_update_two_hand_scale()  # both hands pinch → scale world (handle) or held object
 	_update_scene_handle()  # World handle now drags the XROrigin (the user), not the
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
@@ -1013,6 +1076,15 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 	var total := int(round(base_total * mult))
 	total = max(total, 1)
 
+	# Mix bonus: flip between cube and sphere goals to keep it. Discourages routing every
+	# cube through the bubble (all-spheres) — you score more by landing BOTH types.
+	var is_sphere := cube.is_in_group("sphere")
+	var this_type := 1 if is_sphere else 0
+	var mixed := _last_goal_sphere != -1 and this_type != _last_goal_sphere
+	if mixed:
+		total += MIX_BONUS
+	_last_goal_sphere = this_type
+
 	# Time-attack: tally toward the active round.
 	if _timer_active:
 		_round_score += total
@@ -1031,7 +1103,9 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 	var popup_txt := str(total)
 	if absf(mult - 1.0) > 0.05:
 		popup_txt = "%d  (x%.1f)" % [total, mult]
-	BigScorePopup3D.spawn(self, at + Vector3(0, 0.05, 0), popup_txt, Color(0.55, 0.95, 1.0))
+	if mixed:
+		popup_txt += "  MIX +%d" % MIX_BONUS
+	BigScorePopup3D.spawn(self, at + Vector3(0, 0.05, 0), popup_txt, Color(0.55, 0.95, 1.0) if not mixed else Color(1.0, 0.85, 0.35))
 	_spawn_burst(at, Color(0.40, 0.90, 1.0))
 	_push_score_fanfare()
 
@@ -1654,6 +1728,7 @@ func _start_round() -> void:
 	_timer_active = true
 	_timer_remaining = ROUND_SECONDS
 	_round_score = 0
+	_last_goal_sphere = -1   # fresh mix-bonus chain each round
 	_bed_time = 0.0   # restart the music bed at beat 0
 	_start_cooldown = 1.0
 	_push_sweep(300.0, 900.0, 0.25)  # start chirp
@@ -1813,15 +1888,17 @@ func _refresh_arms_label() -> void:
 		return
 	# Three valid states (never "none"): MESH only / BOTH / REAL only. Label shows the
 	# CURRENT mode; tapping advances the cycle.
+	# HANDS stays in an ORANGE family across all three states (state shown by the label
+	# text), so the button reads as one distinct colour and never collides with SKY's blue.
 	if _hand_mesh_visible and _real_arms_visible:
 		_arms_button_label.text = "HANDS\nBOTH"
-		_arms_button_mat.albedo_color = Color(0.16, 0.34, 0.42)
-		_arms_button_mat.emission = Color(0.55, 0.88, 1.0)
+		_arms_button_mat.albedo_color = Color(0.34, 0.26, 0.08)
+		_arms_button_mat.emission = Color(1.0, 0.80, 0.25)
 		_arms_button_mat.emission_energy_multiplier = 1.3
 	elif _real_arms_visible:
 		_arms_button_label.text = "HANDS\nREAL"
-		_arms_button_mat.albedo_color = Color(0.12, 0.34, 0.50)
-		_arms_button_mat.emission = Color(0.30, 0.75, 1.0)
+		_arms_button_mat.albedo_color = Color(0.34, 0.16, 0.05)
+		_arms_button_mat.emission = Color(1.0, 0.45, 0.10)
 		_arms_button_mat.emission_energy_multiplier = 1.2
 	else:
 		_arms_button_label.text = "HANDS\nMESH"
@@ -1839,8 +1916,9 @@ func _refresh_mute_label() -> void:
 		_mute_button_mat.emission_energy_multiplier = 1.0
 	else:
 		_mute_button_label.text = "SOUND\nON"
-		_mute_button_mat.albedo_color = Color(0.12, 0.34, 0.30)
-		_mute_button_mat.emission = Color(0.30, 0.95, 0.70)
+		# Cyan (distinct from START's green and GESTURES' violet).
+		_mute_button_mat.albedo_color = Color(0.10, 0.30, 0.34)
+		_mute_button_mat.emission = Color(0.20, 0.85, 0.95)
 		_mute_button_mat.emission_energy_multiplier = 1.2
 
 # Toggle sound on/off. Wired as the MUTE poke-button's callback (registry handles the
@@ -2003,16 +2081,16 @@ func _build_control_panel() -> void:
 		Color(0.30, 0.22, 0.10), Color(0.95, 0.62, 0.20), _cycle_hands_mode)
 	var start_e := _add_poke_button(root, Vector3(col_x, row_y[0], 0.012), "START\n30s",
 		Color(0.10, 0.42, 0.24), Color(0.20, 0.95, 0.45), _gp_start)
-	# row1: MUTE | GESTURES
+	# row1: MUTE (cyan) | GESTURES (violet)
 	var mute_e := _add_poke_button(root, Vector3(-col_x, row_y[1], 0.012), "SOUND\nON",
-		Color(0.12, 0.34, 0.30), Color(0.30, 0.95, 0.70), _toggle_mute)
+		Color(0.10, 0.30, 0.34), Color(0.20, 0.85, 0.95), _toggle_mute)
 	var gest_e := _add_poke_button(root, Vector3(col_x, row_y[1], 0.012), "GESTURES\nON",
-		Color(0.12, 0.34, 0.30), Color(0.30, 0.95, 0.70), _gp_toggle_gestures)
-	# row2: SKY | RESET
+		Color(0.22, 0.16, 0.40), Color(0.62, 0.42, 1.0), _gp_toggle_gestures)
+	# row2: SKY (blue) | RESET (magenta)
 	_add_poke_button(root, Vector3(-col_x, row_y[2], 0.012), "SKY",
 		Color(0.12, 0.20, 0.42), Color(0.35, 0.55, 1.0), _toggle_immersion)
 	_add_poke_button(root, Vector3(col_x, row_y[2], 0.012), "RESET",
-		Color(0.30, 0.22, 0.10), Color(0.95, 0.62, 0.20), _reset_sandbox)
+		Color(0.34, 0.10, 0.26), Color(1.0, 0.35, 0.75), _reset_sandbox)
 
 	# Repoint the existing per-button handles at these registry buttons so the bespoke
 	# per-frame logic (timer countdown/pulse, label refreshers) keeps working unchanged.
@@ -2052,12 +2130,13 @@ func _gp_toggle_gestures() -> void:
 	if _gestures_toggle_label != null:
 		_gestures_toggle_label.text = "GESTURES\nON" if _gestures_enabled else "GESTURES\nOFF"
 	if _gestures_toggle_mat != null:
+		# Violet (distinct from the other five buttons); dim when off.
 		if _gestures_enabled:
-			_gestures_toggle_mat.albedo_color = Color(0.12, 0.34, 0.30)
-			_gestures_toggle_mat.emission = Color(0.30, 0.95, 0.70)
+			_gestures_toggle_mat.albedo_color = Color(0.22, 0.16, 0.40)
+			_gestures_toggle_mat.emission = Color(0.62, 0.42, 1.0)
 		else:
-			_gestures_toggle_mat.albedo_color = Color(0.32, 0.12, 0.12)
-			_gestures_toggle_mat.emission = Color(0.95, 0.30, 0.30)
+			_gestures_toggle_mat.albedo_color = Color(0.14, 0.10, 0.22)
+			_gestures_toggle_mat.emission = Color(0.34, 0.24, 0.52)
 	_push_sweep(300.0, 900.0, 0.18) if _gestures_enabled else _push_sweep(900.0, 300.0, 0.18)
 
 # Update the bigger BEST readout on the gesture panel (call after a new best is saved).
@@ -2184,7 +2263,7 @@ func _build_leaderboard_panel() -> void:
 	cs.shape = box
 	root.add_child(cs)
 	_register_grabbable(root)
-	_attach_destruct_button(root, Vector3(0.0, -size_y * 0.5 - 0.045, 0.0))
+	_attach_destruct_button(root, Vector3(0.0, -size_y * 0.5 - 0.018, 0.0))
 
 func _update_leaderboard(delta: float) -> void:
 	_lb_refresh_t -= delta
@@ -2239,6 +2318,47 @@ func _save_best() -> void:
 		f.store_line(str(_best_score))
 		f.close()
 
+# Big in-world DEBUG button to A/B the grab-follow approaches live. Poke CYCLE to advance
+# through PickupAbleBody3D.grab_mode (FINGER+MED / WRIST / SMOOTH / RAW); the readout shows the
+# active mode. Temporary tuning aid — removed once we lock the winning approach.
+func _build_grabmode_debug() -> void:
+	var root := Node3D.new()
+	root.name = "GrabModeDebug"
+	root.position = Vector3(0.62, 1.28, -0.7)   # to the user's right, within reach
+	add_child(root)
+
+	var bg := MeshInstance3D.new()
+	var q := QuadMesh.new()
+	q.size = Vector2(0.36, 0.26)
+	bg.mesh = q
+	var bgm := StandardMaterial3D.new()
+	bgm.albedo_color = Color(0.06, 0.02, 0.07, 0.9)
+	bgm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bgm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg.material_override = bgm
+	bg.position = Vector3(0, 0, -0.004)
+	root.add_child(bg)
+
+	var title := _panel_label("DEBUG · GRAB MODE", 22, Color(1.0, 0.5, 0.9, 1.0), 7)
+	title.position = Vector3(0, 0.092, 0.004)
+	root.add_child(title)
+
+	_grabmode_label = _panel_label("%d: %s" % [PickupAbleBody3D.grab_mode, PickupAbleBody3D.GRAB_MODE_NAMES[PickupAbleBody3D.grab_mode]], 30, Color(1.0, 0.95, 0.5, 1.0), 9)
+	_grabmode_label.position = Vector3(0, 0.04, 0.004)
+	root.add_child(_grabmode_label)
+
+	_add_poke_button(root, Vector3(0, -0.05, 0.012), "CYCLE  ▶",
+		Color(0.34, 0.10, 0.30), Color(1.0, 0.35, 0.85), _cycle_grab_mode)
+
+# Advance the live grab-follow mode (wired to the debug CYCLE button).
+func _cycle_grab_mode() -> void:
+	PickupAbleBody3D.grab_mode = (PickupAbleBody3D.grab_mode + 1) % PickupAbleBody3D.GRAB_MODE_NAMES.size()
+	var nm: String = PickupAbleBody3D.GRAB_MODE_NAMES[PickupAbleBody3D.grab_mode]
+	if _grabmode_label != null:
+		_grabmode_label.text = "%d: %s" % [PickupAbleBody3D.grab_mode, nm]
+	_gdiag("GRABMODE -> %d %s" % [PickupAbleBody3D.grab_mode, nm])
+	_push_sweep(400.0, 950.0, 0.18)
+
 # Floating cold-open explainer: goal of the game + control map, with small 3D
 # icon "diagrams". Grabbable/movable like the other panels (and self-destructible).
 func _build_instructions_panel() -> void:
@@ -2252,8 +2372,8 @@ func _build_instructions_panel() -> void:
 	root.freeze_on_release = true
 	add_child(root)
 
-	var size_x := 0.52
-	var size_y := 0.72  # taller: extra START-prompt paragraph + WRIST/MUTE control lines
+	var size_x := 0.54
+	var size_y := 0.46  # snug around the blurb + controls table + gesture footer (no dead space)
 
 	# Accent + dark backing.
 	var accent_mat := StandardMaterial3D.new()
@@ -2281,22 +2401,64 @@ func _build_instructions_panel() -> void:
 	bg.material_override = bgmat
 	root.add_child(bg)
 
-	var title := _panel_label("HOW TO PLAY", 42, Color(1.0, 0.80, 0.30, 1.0), 9)
-	title.position = Vector3(0, size_y * 0.5 - 0.05, 0.006)
+	var title := _panel_label("HOW TO PLAY", 38, Color(1.0, 0.80, 0.30, 1.0), 9)
+	title.position = Vector3(0, size_y * 0.5 - 0.035, 0.006)
 	root.add_child(title)
 
+	# Blurb now also spells out the two bonuses (smaller goal = bigger multiplier; mixing
+	# cubes & spheres into the goal = MIX bonus), which both fills the panel and teaches them.
 	var goal := _panel_label(
-		"Can you get the most points in 30\nseconds? When you're ready, hit the\ngreen START.\n\nCubes pour from the emitter — land\nthem in the goal ring to score.\n\nPOINTS = seconds alive + surface\nhits. Hit several surfaces FAST to\nbuild a chain multiplier (up to x8)!",
-		26, Color(0.92, 0.95, 1.0, 1.0), 6)
-	goal.position = Vector3(0, size_y * 0.5 - 0.20, 0.006)
+		"Get the most points in 30 seconds — hit\ngreen START. Cubes pour from the emitter;\nland them in the goal ring. POINTS =\nseconds alive + surface hits, chained x8.\nSMALLER goal ring = bigger multiplier (x4).\nLand BOTH cubes AND spheres — alternating\nthem in the goal scores a MIX bonus!",
+		20, Color(0.92, 0.95, 1.0, 1.0), 6)
+	goal.position = Vector3(0, size_y * 0.5 - 0.13, 0.006)
 	root.add_child(goal)
 
-	var controls := _panel_label(
-		"index pinch     grab & move\nBOTH hands      scale + rotate\nmiddle pinch    show / hide hands\nring pinch      reset everything\npinky pinch     immersive sky\npoke START      30s time attack\npoke HANDS      mesh / real arms\npoke MUTE       sound on / off\ngesture panel   buttons for all\ngrab the bar    move / scale world",
-		24, Color(0.62, 0.92, 1.0, 1.0), 6)
-	controls.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	controls.position = Vector3(0, -size_y * 0.5 + 0.18, 0.006)
-	root.add_child(controls)
+	# Controls as a 3-column table — BUTTON | GESTURE | ACTION — so it's unambiguous these
+	# are the panel BUTTONS (and their optional pinch gesture), not "poke your own hands".
+	# The table's own header row (+ dashed rule) IS the header — no separate floating
+	# "CONTROLS" label (it read as detached). Monospace SystemFont + fixed-width columns
+	# (every line padded to TABLE_COLS) make the block a centred rectangle; LEFT-align anchors
+	# the text's left edge at node x, so x = -half-block-width centres it.
+	var mono := SystemFont.new()
+	mono.font_names = PackedStringArray(["Menlo", "Courier New", "Courier", "monospace"])
+	var rows := [
+		["BUTTON", "GESTURE", "ACTION"],
+		["", "", ""],   # placeholder; replaced by a dashed rule below
+		["HANDS", "middle pinch", "mesh/both/real"],
+		["START", "-", "30s time attack"],
+		["MUTE", "-", "sound on/off"],
+		["GESTURES", "-", "toggle pinches"],
+		["SKY", "pinky pinch", "sky/passthrough"],
+		["RESET", "ring pinch", "reset all"],
+	]
+	const TABLE_COLS := 40
+	var ctl_lines := PackedStringArray()
+	for i in range(rows.size()):
+		if i == 1:
+			ctl_lines.append("".rpad(TABLE_COLS, "-"))   # header rule, full table width
+		else:
+			var r: Array = rows[i]
+			ctl_lines.append(((r[0] as String).rpad(10) + (r[1] as String).rpad(14) + (r[2] as String)).rpad(TABLE_COLS))
+	var table := Label3D.new()
+	table.font = mono
+	table.font_size = 22
+	table.outline_size = 5
+	table.modulate = Color(0.93, 0.97, 1.0, 1.0)
+	table.outline_modulate = Color(0, 0, 0, 0.95)
+	table.pixel_size = 0.00046
+	table.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	table.shaded = false
+	table.text = "\n".join(ctl_lines)
+	# Centre the fixed-width block: glyph advance ≈ font_size * pixel_size * 0.6 (mono).
+	var table_w := TABLE_COLS * table.font_size * table.pixel_size * 0.6
+	table.position = Vector3(-table_w * 0.5, -0.05, 0.006)
+	root.add_child(table)
+
+	var footer := _panel_label(
+		"Also: index-pinch = grab  •  both hands = scale / rotate\ngrab the chrome bar = move / scale the whole world",
+		16, Color(0.78, 0.84, 0.95, 1.0), 5)
+	footer.position = Vector3(0, -size_y * 0.5 + 0.04, 0.006)
+	root.add_child(footer)
 
 	# Tiny 3D "diagram" icons flanking the title: a goal ring + a cube.
 	var ring_icon := MeshInstance3D.new()
@@ -2333,7 +2495,7 @@ func _build_instructions_panel() -> void:
 	cs.shape = box
 	root.add_child(cs)
 	_register_grabbable(root)
-	_attach_destruct_button(root, Vector3(0.0, -size_y * 0.5 - 0.05, 0.0))
+	_attach_destruct_button(root, Vector3(0.0, -size_y * 0.5 - 0.018, 0.0))
 
 # Attach a small red self-destruct button beneath a panel (child, so it rides the
 # panel when moved). Poke it to dissolve the panel; reset brings it back.
@@ -2354,6 +2516,20 @@ func _attach_destruct_button(panel: Node3D, local_pos: Vector3) -> void:
 	m.emission_energy_multiplier = 1.6
 	mi.material_override = m
 	btn.add_child(mi)
+	# Tiny "DO NOT PRESS" warning sitting over the sphere (billboarded so it always faces
+	# the user). Slightly in front of the sphere so it reads clearly.
+	var warn := Label3D.new()
+	warn.text = "DO NOT\nPRESS"
+	warn.font_size = 16
+	warn.outline_size = 5
+	warn.modulate = Color(1.0, 0.92, 0.45)
+	warn.outline_modulate = Color(0, 0, 0, 0.95)
+	warn.pixel_size = 0.00034
+	warn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	warn.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	warn.shaded = false
+	warn.position = Vector3(0, 0, 0.03)
+	btn.add_child(warn)
 	panel.add_child(btn)
 	_panels.append({"panel": panel, "button": btn})
 
@@ -2423,9 +2599,18 @@ func _update_scene_handle() -> void:
 			# the origin transform so the on-bar test still holds after a prior drag has
 			# displaced the origin (tracking and world only coincide at origin identity).
 			var pp_world: Vector3 = origin.global_transform * (pp as Vector3)
-			if pp_world.distance_to(_scene_handle.global_position) <= HANDLE_GRAB_DIST:
+			# Distance to the whole BAR SEGMENT (centre ± half-length along the handle's X),
+			# not just its centre — so the sphere end-knobs are grabbable too, not only the
+			# middle of the cylinder.
+			var hc: Vector3 = _scene_handle.global_position
+			var hx: Vector3 = _scene_handle.global_transform.basis.x.normalized()
+			var hhalf: float = SceneHandle3D.BAR_LENGTH * 0.5
+			var ht: float = clampf((pp_world - hc).dot(hx), -hhalf, hhalf)
+			var nearest_on_bar: Vector3 = hc + hx * ht
+			if pp_world.distance_to(nearest_on_bar) <= HANDLE_GRAB_DIST:
 				_handle_held_side = side
 				_handle_prev_pinch = pp  # remember TRACKING-space pinch for the delta
+				_handle_filt_delta = Vector3.ZERO  # reset the drag-damping filter
 				_scene_handle.set_held(true)
 				_append_log("handle grabbed by %s" % side)
 				break
@@ -2449,7 +2634,10 @@ func _update_scene_handle() -> void:
 	var cur: Vector3 = hold_pinch
 	if _handle_prev_pinch != null:
 		var d_track: Vector3 = cur - (_handle_prev_pinch as Vector3)
-		origin.global_position -= origin.global_transform.basis * d_track
+		# A little dampening: low-pass the per-frame drag delta so fingertip jitter doesn't
+		# make the whole world (origin) twitch. Lower HANDLE_DAMP_ALPHA = smoother/laggier.
+		_handle_filt_delta = _handle_filt_delta.lerp(d_track, HANDLE_DAMP_ALPHA)
+		origin.global_position -= origin.global_transform.basis * _handle_filt_delta
 	_handle_prev_pinch = cur
 
 func _release_handle() -> void:
@@ -2472,8 +2660,17 @@ func _update_two_hand_scale() -> void:
 	var pL: Variant = _index_pinch_point("left_hand")    # tracking space
 	var pR: Variant = _index_pinch_point("right_hand")
 	if pL == null or pR == null:
+		# Debounce: a 1-frame pinch dropout mid-scale shouldn't tear the gesture down (and,
+		# with release-on-end below, would otherwise drop the object). Only end once a pinch
+		# has been genuinely absent for SCALE_END_GRACE frames.
+		if _scale_active:
+			_scale_lost_frames += 1
+			if _scale_lost_frames < SCALE_END_GRACE:
+				_two_hand_world_active = _scale_is_world  # hold world-glue too during the grace
+				return
 		_end_scale()
 		return
+	_scale_lost_frames = 0
 	var origin := $XROrigin3D as Node3D
 	var PA: Vector3 = origin.global_transform * (pL as Vector3)   # current world pinch L
 	var PB: Vector3 = origin.global_transform * (pR as Vector3)   # current world pinch R
@@ -2505,6 +2702,9 @@ func _update_two_hand_scale() -> void:
 		_scale_is_world = is_world
 		_scale_A0 = PA
 		_scale_B0 = PB
+		_gdiag("SCALE_ENGAGE world=%s target=%s L=%s R=%s" % [
+			str(is_world), ("none" if obj == null else "%s#%d" % [obj.name, obj.get_instance_id()]),
+			_hand_holds("left_hand"), _hand_holds("right_hand")])
 		if is_world:
 			_scale_WA = PA   # world points under the pinches, frozen at engage
 			_scale_WB = PB
@@ -2563,14 +2763,30 @@ func _update_two_hand_scale() -> void:
 
 func _end_scale() -> void:
 	if _scale_active:
+		_gdiag("SCALE_END world=%s target=%s L=%s R=%s" % [
+			str(_scale_is_world),
+			("none" if _scale_target == null or not is_instance_valid(_scale_target) else "%s#%d" % [_scale_target.name, _scale_target.get_instance_id()]),
+			_hand_holds("left_hand"), _hand_holds("right_hand")])
 		if _scale_target != null and is_instance_valid(_scale_target) and _scale_target.has_method("set_two_hand"):
 			_scale_target.set_two_hand(false)
+			# Fully RELEASE the scaled object so it's placed in space and can be re-grabbed by
+			# EITHER hand. Previously it stayed latched to whichever hand had been holding it,
+			# so the other hand silently couldn't grab it after a scale (the "right pinch won't
+			# grab but left does" report). Clear both handlers' latch + the body's own.
+			for side in ["left_hand", "right_hand"]:
+				var h = _hand_handlers.get(side)
+				if h != null and h.picked_up_body == _scale_target:
+					h.picked_up_body = null
+					h.was_pickup_pressed = true   # require a fresh pinch edge before re-grab
+			if _scale_target.has_method("let_go"):
+				_scale_target.let_go()
 		if _scale_is_world and _scene_handle != null and _scene_handle.has_method("set_scaling"):
 			_scene_handle.set_scaling(false)
 	_scale_active = false
 	_scale_is_world = false
 	_scale_target = null
 	_scaling_body = null
+	_scale_lost_frames = 0
 
 # Approx world-space grab radius of an object (half AABB diagonal × scale + grace),
 # so "free pinch near the object" scales with object size.
@@ -2676,3 +2892,23 @@ func _append_log(msg: String):
 		f.store_string(msg + "\n")
 		f.close()
 		print("[Sandbox] " + msg)
+
+# Append a line to the dedicated grab telemetry file (grab_diag.txt). Pull it with devicectl
+# after a session. Flip GRAB_DIAG off (or delete this + its callers) for release.
+const GRAB_DIAG := true
+func _gdiag(line: String) -> void:
+	if not GRAB_DIAG:
+		return
+	var f := FileAccess.open("user://grab_diag.txt", FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open("user://grab_diag.txt", FileAccess.WRITE)
+	if f != null:
+		f.seek_end()
+		f.store_line("%8.2f %s" % [Time.get_ticks_msec() / 1000.0, line])
+		f.close()
+
+func _hand_holds(side: String) -> String:
+	var h = _hand_handlers.get(side)
+	if h != null and h.picked_up_body != null:
+		return "%s#%d" % [h.picked_up_body.name, h.picked_up_body.get_instance_id()]
+	return "none"

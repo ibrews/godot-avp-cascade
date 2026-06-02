@@ -69,6 +69,43 @@ const REL_FRAMES := 12
 var _rel_log : Array = []
 var _rel_active := false
 
+# --- Grab telemetry (grab_diag.txt). Flip GRAB_DIAG off (or delete) for release. ---
+const GRAB_DIAG := true
+var _gdiag_frame := 0
+
+# --- A/B grab-follow modes, cycled live by the big in-world DEBUG button (main_v2). Shared
+# static so the handler (anchor source) and this body (follow filter) both read it. Once we
+# pick a winner this collapses to that one approach.
+#   0 FINGER+MED  fingertip midpoint, median-of-3 de-spike, tight follow
+#   1 WRIST       anchor on the WRIST joint (immune to held-object finger occlusion), tight
+#   2 SMOOTH      fingertip midpoint, heavy low-pass (stable but laggy)
+#   3 RAW         fingertip midpoint, ~1:1 (no smoothing) — baseline feel
+static var grab_mode : int = 0
+const GRAB_MODE_NAMES := ["FINGER+MED", "WRIST", "SMOOTH", "RAW"]
+
+# Position one-euro min-cutoff per mode (Hz). Higher = tighter/less lag.
+func _mode_pos_cutoff() -> float:
+	match grab_mode:
+		2: return 2.5     # SMOOTH
+		3: return 30.0    # RAW (effectively 1:1)
+		_: return 9.0     # FINGER+MED / WRIST — tight
+
+func _gdiag(line: String) -> void:
+	if not GRAB_DIAG:
+		return
+	var f := FileAccess.open("user://grab_diag.txt", FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open("user://grab_diag.txt", FileAccess.WRITE)
+	if f != null:
+		f.seek_end()
+		f.store_line("%8.2f %s" % [Time.get_ticks_msec() / 1000.0, line])
+		f.close()
+
+func _holder_side() -> String:
+	if picked_up_by != null and picked_up_by.get_parent() != null and "tracker" in picked_up_by.get_parent():
+		return str(picked_up_by.get_parent().tracker)
+	return "?"
+
 # --- Held-follow smoothing (one-euro: position + adaptive-slerp rotation) ---
 # The held body used to ride the handler 1:1, which passed raw XRHandTracker sensor
 # noise straight through ("electric" jitter on pos AND rotation). We instead keep a
@@ -78,17 +115,21 @@ var _rel_active := false
 # jitter, which is the trap the KB warns about). One-euro = smooth at rest, opens its
 # cutoff with speed so fast moves keep ~zero lag. Render-rate (_process), never physics.
 # Tune on-device: *_MIN_CUTOFF ↓ = smoother/laggier at rest ; *_BETA ↑ = snappier when moving.
-const FOLLOW_POS_MIN_CUTOFF := 2.0   # Hz
-const FOLLOW_POS_BETA := 0.7         # per (m/s)
+const FOLLOW_POS_MIN_CUTOFF := 9.0   # Hz — track tight (~18 ms lag). The anchor is now de-spiked
+                                     # upstream (median-of-3 in pickup_handler), so spikes don't
+                                     # reach this filter and we don't need smoothing to hide them.
+const FOLLOW_POS_BETA := 1.0         # per (m/s) — small extra opening at speed
 const FOLLOW_ROT_MIN_CUTOFF := 3.0   # Hz
 const FOLLOW_ROT_BETA := 0.35        # per (rad/s)
-const FOLLOW_DCUTOFF := 1.0          # Hz, cutoff for the speed estimates themselves
+const FOLLOW_DCUTOFF := 2.5          # Hz — was 1.0; the speed estimate must react FAST or the
+                                     # adaptive cutoff opens late and a quick move lags ~1s behind
 # Spike rejection: a single bad XRHandTracker sample makes target_pos leap, which
 # spikes d_pos, opens the one-euro cutoff, and snaps the held body to the glitch for
 # one frame (then back) — the "glitches into other positions for a frame" report.
 # Clamp the target to a max plausible HAND speed each frame, so a superhuman jump is
 # capped (rejected) rather than chased; real fast moves up to the cap pass through.
-const FOLLOW_MAX_LIN_SPEED := 4.0    # m/s — hands don't outrun this; spikes are noise
+const FOLLOW_MAX_LIN_SPEED := 6.0    # m/s — backstop only now (median de-spikes upstream); pass
+                                     # genuine fast moves (~1-3 m/s) and still reject gross teleports.
 const FOLLOW_MAX_ANG_SPEED := 25.0   # rad/s — same idea for orientation
 var _follow_ready := false
 var _filt_pos : Vector3 = Vector3.ZERO
@@ -96,11 +137,12 @@ var _filt_basis : Basis = Basis.IDENTITY
 var _filt_vel : Vector3 = Vector3.ZERO      # filtered linear speed (m/s)
 var _filt_avel : float = 0.0                # filtered angular speed (rad/s)
 var _grab_rot_offset : Basis = Basis.IDENTITY   # held body's basis relative to the holder, at grab
-# The body CENTRE (origin) expressed in the HOLDER's local frame at grab time. Driving the
-# follow with this offset (instead of the bare holder origin) keeps the GRABBED POINT under
-# the finger and makes the object rotate ABOUT that point, not snap its centre to the hand.
-# Without it, grabbing a wide panel by its edge teleported the panel centre onto your fingertip
-# (so you'd then poke a button you didn't mean to). Captured in pick_up, applied in _process.
+# The GRABBED POINT, expressed in the body's own (unscaled, mesh-local) frame at grab time.
+# The follow offsets the body origin so this exact point stays pinned under the finger and the
+# object rotates ABOUT it — instead of snapping the body CENTRE onto the fingertip (which made
+# a grabbed panel orbit your finger, and teleported its centre onto a button you didn't mean to
+# poke). Captured in pick_up, applied in _process.
+var _grab_point_local : Vector3 = Vector3.ZERO
 var _grab_scale : Vector3 = Vector3.ONE
 
 
@@ -153,52 +195,73 @@ func _process(delta: float) -> void:
 		return
 
 	var holder_xform := holder.global_transform
-	# One-hand follow (the v0.1.8-smooth behaviour the user liked): the body CENTRE rides the
-	# pinch centre (= the handler/fingertip anchor), and orientation follows the hand via the
-	# grab-relative offset. You manipulate the object from its centre and keep a firm hold as
-	# you move + rotate. Accidental button presses are prevented by the manipulation gate +
-	# edge-triggered pokes in main_v2 (_manipulating / _update_poke_buttons), NOT by changing
-	# this grab feel. (The v0.8.x "grab-from-point" / "rotate-about-centre-tracking-translation"
-	# experiments both felt wrong and are reverted.)
-	var target_pos := holder_xform.origin
+	# One-hand follow, GRAB-BY-POINT. We smooth the INPUTS — the pinch/PIVOT point (your grab
+	# point = the holder origin) and the orientation — then reconstruct the body origin so the
+	# grabbed local point sits EXACTLY on the smoothed pivot every frame. Smoothing the pivot
+	# (which only moves at hand-translation speed) instead of the body origin is the whole
+	# trick: when you rotate your wrist, the body ORIGIN has to swing fast to keep a far grab
+	# point pinned, and the linear speed-cap below would throttle that origin motion — sliding
+	# the object off your finger (the "it doesn't stay locked, swings all over" bug). The pivot
+	# never trips the cap, so the grab point stays locked through arbitrary rotation.
+	# _filt_pos now holds the filtered PIVOT (grab-point world pos), not the body origin.
+	var target_pivot := holder_xform.origin
+	var finger_anchor := holder_xform.origin   # the RAW fingertip pinch this frame (pre-clamp)
 	var target_basis := (holder_xform.basis.orthonormalized() * _grab_rot_offset).orthonormalized()
+	var clamp_lin := false
+	var clamp_ang := false
 
 	if not _follow_ready or delta <= 0.0:
-		# Seed from the body's current visual pose so the grab eases in from where it is.
-		_filt_pos = global_position
+		# Seed the filtered pivot from the grab point's CURRENT world position so it eases in.
 		_filt_basis = global_transform.basis.orthonormalized()
+		_filt_pos = global_position + _filt_basis.scaled(_grab_scale) * _grab_point_local
 		_filt_vel = Vector3.ZERO
 		_filt_avel = 0.0
 		_follow_ready = true
 	else:
-		# --- Spike rejection (before the filter sees it). If this frame's target implies a
-		# superhuman hand speed, it's a tracking glitch, not a real move: clamp the target to
-		# the max-speed sphere around the current filtered pose. A genuine fast move (≤ cap)
-		# is untouched; a one-frame teleport is reined in so it can't snap the body. ---
+		# --- Spike rejection on the PIVOT (hand point). A superhuman jump is a tracking glitch,
+		# not a real move: clamp to the max-speed sphere. The pivot tracks the hand at hand
+		# speed, so genuine moves are never clamped — only teleport glitches. ---
 		var max_step := FOLLOW_MAX_LIN_SPEED * delta
-		var to_target := target_pos - _filt_pos
+		var to_target := target_pivot - _filt_pos
 		if to_target.length() > max_step:
-			target_pos = _filt_pos + to_target.normalized() * max_step
+			target_pivot = _filt_pos + to_target.normalized() * max_step
+			clamp_lin = true
 		var max_ang_step := FOLLOW_MAX_ANG_SPEED * delta
 		var raw_ang := _filt_basis.get_rotation_quaternion().angle_to(target_basis.get_rotation_quaternion())
 		if raw_ang > max_ang_step and raw_ang > 0.0:
 			# Clamp the rotation target to the max angular step toward it.
 			target_basis = _filt_basis.slerp(target_basis, max_ang_step / raw_ang).orthonormalized()
+			clamp_ang = true
 
 		var a_d := _oe_alpha(FOLLOW_DCUTOFF, delta)
-		# Position one-euro. Cap the velocity estimate so the adaptive cutoff can't blow
+		# Pivot one-euro. Cap the velocity estimate so the adaptive cutoff can't blow
 		# wide open from any residual spike (belt-and-suspenders with the clamp above).
-		var d_pos := (target_pos - _filt_pos) / delta
+		var d_pos := (target_pivot - _filt_pos) / delta
 		_filt_vel = _filt_vel.lerp(d_pos, a_d)
-		var p_cut := FOLLOW_POS_MIN_CUTOFF + FOLLOW_POS_BETA * minf(_filt_vel.length(), FOLLOW_MAX_LIN_SPEED)
-		_filt_pos = _filt_pos.lerp(target_pos, _oe_alpha(p_cut, delta))
+		var p_cut := _mode_pos_cutoff() + FOLLOW_POS_BETA * minf(_filt_vel.length(), FOLLOW_MAX_LIN_SPEED)
+		_filt_pos = _filt_pos.lerp(target_pivot, _oe_alpha(p_cut, delta))
 		# Rotation one-euro (adaptive slerp).
 		var ang := _filt_basis.get_rotation_quaternion().angle_to(target_basis.get_rotation_quaternion())
 		_filt_avel = lerpf(_filt_avel, ang / delta, a_d)
 		var r_cut := FOLLOW_ROT_MIN_CUTOFF + FOLLOW_ROT_BETA * minf(_filt_avel, FOLLOW_MAX_ANG_SPEED)
 		_filt_basis = _filt_basis.slerp(target_basis, _oe_alpha(r_cut, delta)).orthonormalized()
 
-	global_transform = Transform3D(_filt_basis.scaled(_grab_scale), _filt_pos)
+	# Reconstruct the body origin so the grabbed local point lands EXACTLY on the filtered pivot.
+	var body_origin := _filt_pos - _filt_basis.scaled(_grab_scale) * _grab_point_local
+	global_transform = Transform3D(_filt_basis.scaled(_grab_scale), body_origin)
+
+	# --- Diagnostics: the grabbed point ends up at _filt_pos by construction; SLIP is how far
+	# that is from the actual fingertip this frame. ~0 = glued; a spike during rotation = the
+	# "lost my attach point" bug, now quantified. Throttled to ~12 Hz, plus always log a big slip.
+	if GRAB_DIAG:
+		_gdiag_frame += 1
+		var slip_mm := (_filt_pos - finger_anchor).length() * 1000.0
+		if _gdiag_frame % 8 == 0 or slip_mm > 15.0 or clamp_lin:
+			var src := "?"
+			if picked_up_by != null and "anchor_src" in picked_up_by:
+				src = picked_up_by.anchor_src
+			_gdiag("HOLD %s obj=%s slip_mm=%.1f anchor_spd=%.2f src=%s clampL=%d clampA=%d" % [
+				_holder_side(), name, slip_mm, _filt_vel.length(), src, int(clamp_lin), int(clamp_ang)])
 
 	# Per-render-frame grab trace (one-shot per grab, ~90 frames ≈ 1 s at 90 Hz).
 	if not _trace_done:
@@ -254,10 +317,19 @@ func pick_up(pick_up_by) -> void:
 	var holder := pick_up_by as Node3D
 	if holder != null:
 		_grab_rot_offset = holder.global_transform.basis.orthonormalized().inverse() * current_transform.basis.orthonormalized()
+		# Where on the body did we grab? Map the holder (fingertip/pinch) world point into the
+		# body's local mesh frame so the follow can keep THAT point under the finger and rotate
+		# the body about it. affine_inverse divides out the body's scale, giving unscaled local.
+		_grab_point_local = current_transform.affine_inverse() * holder.global_transform.origin
 	else:
 		_grab_rot_offset = Basis.IDENTITY
+		_grab_point_local = Vector3.ZERO
 	_grab_scale = current_transform.basis.get_scale()
 	_follow_ready = false   # seed the filter from the current pose on the first frame
+	if holder != null:
+		_gdiag("GRABBED obj=%s#%d body=%s anchor=%s gp_local=%s scale=%s" % [
+			name, get_instance_id(), str(current_transform.origin),
+			str(holder.global_transform.origin), str(_grab_point_local), str(_grab_scale)])
 
 	# Grab-snap probe: the resting→hand angle the old IDENTITY snap would have applied.
 	if holder != null:
@@ -272,6 +344,8 @@ func pick_up(pick_up_by) -> void:
 
 # Let this object go — applies throw velocity from position history.
 func let_go() -> void:
+	if picked_up_by != null:
+		_gdiag("LETGO obj=%s#%d body=%s" % [name, get_instance_id(), str(global_position)])
 	if not picked_up_by:
 		return
 

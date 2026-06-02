@@ -37,6 +37,46 @@ var picked_up_body: PickupAbleBody3D
 var was_pickup_pressed : bool = false
 var release_started_msec : int = 0
 
+# Last good offsets from each fingertip to the pinch midpoint. When BOTH tips track we use
+# their midpoint AND record these; if one tip then drops to untracked for a frame (common
+# mid-rotation), we reconstruct the SAME midpoint from the surviving tip instead of snapping
+# the anchor onto that single tip (a ~1–2 cm lurch that slid the held object off the grab
+# point). Keeps the anchor continuous across tracking flickers.
+var _mid_from_index : Vector3 = Vector3.ZERO
+var _mid_from_thumb : Vector3 = Vector3.ZERO
+var _have_mid_offsets : bool = false
+
+# Median-of-3 de-spiker for the fingertip anchor. The telemetry showed isolated single-frame
+# jumps (anchor teleports ~8 cm while hand speed is ~1 m/s) — especially on the hand holding a
+# plate (fingers occluded from the cameras). A component-wise median of the last 3 samples
+# removes a one-frame spike with ~0 lag on real (monotonic) motion — the right tool for spikes
+# (a low-pass lags everything; a speed clamp only caps a spike's size). Tracking space.
+var _anchor_hist : Array[Vector3] = []
+
+func _median3(a: float, b: float, c: float) -> float:
+	return a + b + c - minf(a, minf(b, c)) - maxf(a, maxf(b, c))
+
+# --- Diagnostics (grab_diag.txt). Flip GRAB_DIAG off (or delete) for release. ---
+const GRAB_DIAG := true
+var anchor_src : String = "none"     # both / index / thumb / none — read by the held body's HOLD log
+var _blocked_held : PickupAbleBody3D = null   # nearest in-range body we skipped because it's already held
+var _blocked_logged := false
+
+func _gdiag(line: String) -> void:
+	if not GRAB_DIAG:
+		return
+	var f := FileAccess.open("user://grab_diag.txt", FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open("user://grab_diag.txt", FileAccess.WRITE)
+	if f != null:
+		f.seek_end()
+		f.store_line("%8.2f %s" % [Time.get_ticks_msec() / 1000.0, line])
+		f.close()
+
+func _side() -> String:
+	var c := _get_parent_controller()
+	return str(c.tracker) if c != null else "?"
+
 
 # Reads a normalized pickup value from whichever input naming convention
 # the active XR interface provides.
@@ -142,24 +182,66 @@ func _update_anchor_from_hand_tracker() -> void:
 		return
 
 	var target_position := Vector3.ZERO
+	var new_src := "none"
 	if has_index and has_thumb:
 		var index_tip := hand_tracker.get_hand_joint_transform(index_joint).origin
 		var thumb_tip := hand_tracker.get_hand_joint_transform(thumb_joint).origin
 		target_position = (index_tip + thumb_tip) * 0.5
+		# Record the midpoint relative to each tip so we can hold it if one drops next frame.
+		_mid_from_index = target_position - index_tip
+		_mid_from_thumb = target_position - thumb_tip
+		_have_mid_offsets = true
+		new_src = "both"
 	elif has_index:
-		target_position = hand_tracker.get_hand_joint_transform(index_joint).origin
+		# Only the index is tracked: reconstruct the midpoint from the last offset instead of
+		# snapping the anchor onto the bare fingertip (continuity across the flicker).
+		var index_tip := hand_tracker.get_hand_joint_transform(index_joint).origin
+		target_position = index_tip + (_mid_from_index if _have_mid_offsets else Vector3.ZERO)
+		new_src = "index"
 	else:
-		target_position = hand_tracker.get_hand_joint_transform(thumb_joint).origin
+		var thumb_tip := hand_tracker.get_hand_joint_transform(thumb_joint).origin
+		target_position = thumb_tip + (_mid_from_thumb if _have_mid_offsets else Vector3.ZERO)
+		new_src = "thumb"
+	# Log anchor-source changes while holding — catches the tracking flicker that used to lurch
+	# the grab point (both → index/thumb → both).
+	if new_src != anchor_src:
+		if picked_up_body != null:
+			_gdiag("ANCHORSRC %s %s->%s" % [_side(), anchor_src, new_src])
+		anchor_src = new_src
 
-	# Raw fingertip anchor at render rate. The still-hold grab_trace.txt proved this is
-	# already clean (<0.3 mm/frame jitter); a one-euro filter here only added rubber-band
-	# lag against natural hand sway, so it was reverted. Fix A (this running in _process,
-	# not _physics_process) is what removed the 60/90 Hz beat — that's the real fix.
+	# De-spike: median-of-3 of the raw anchor kills isolated single-frame fingertip jumps
+	# (the telemetry's "anchor teleports 8 cm at 1 m/s" spikes) with ~zero lag on real motion.
+	_anchor_hist.push_back(target_position)
+	if _anchor_hist.size() > 3:
+		_anchor_hist.pop_front()
+	var despiked := target_position
+	if _anchor_hist.size() == 3:
+		despiked = Vector3(
+			_median3(_anchor_hist[0].x, _anchor_hist[1].x, _anchor_hist[2].x),
+			_median3(_anchor_hist[0].y, _anchor_hist[1].y, _anchor_hist[2].y),
+			_median3(_anchor_hist[0].z, _anchor_hist[1].z, _anchor_hist[2].z))
+		if picked_up_body != null:
+			var rej := (target_position - despiked).length() * 1000.0
+			if rej > 15.0:
+				_gdiag("DESPIKE %s rejected_mm=%.1f" % [_side(), rej])
+
+	# Choose the anchor POSITION per the live A/B grab mode (cycled by the in-world debug
+	# button). WRIST mode is the key experiment: anchoring on the wrist joint instead of the
+	# fingertips dodges the multi-frame occlusion bursts the telemetry showed when a held plate
+	# blocks the fingers from the cameras. SMOOTH/RAW use the raw fingertip (body filter differs).
+	var anchor_pos := despiked
+	match PickupAbleBody3D.grab_mode:
+		1:  # WRIST
+			if _joint_has_tracked_position(hand_tracker, XRHandTracker.HAND_JOINT_WRIST):
+				anchor_pos = hand_tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST).origin
+		2, 3:  # SMOOTH / RAW
+			anchor_pos = target_position
+
 	# target_position is TRACKING-space (XROrigin-relative); render it through the origin
 	# so the grab anchor (and the held body riding it) stays on the real hand after a
 	# world-handle drag shifts the origin. Reduces to identity at origin-home.
 	var anchor_transform := global_transform
-	anchor_transform.origin = _origin_xform() * target_position
+	anchor_transform.origin = _origin_xform() * anchor_pos
 	global_transform = anchor_transform
 
 
@@ -197,13 +279,17 @@ func _update_closest_body() -> void:
 	# Find the body that is currently the closest.
 	var new_closest_body : PickupAbleBody3D
 	var closest_distance : float = 1000000.0
+	_blocked_held = null   # nearest in-range body we can't grab because another hand holds it
 
 	for body in get_overlapping_bodies():
-		if body is PickupAbleBody3D and not body.is_picked_up():
-			var distance_squared = (body.global_position - global_position).length_squared()
-			if distance_squared < closest_distance:
-				new_closest_body = body
-				closest_distance = distance_squared
+		if body is PickupAbleBody3D:
+			if not body.is_picked_up():
+				var distance_squared = (body.global_position - global_position).length_squared()
+				if distance_squared < closest_distance:
+					new_closest_body = body
+					closest_distance = distance_squared
+			elif body.picked_up_by != self:
+				_blocked_held = body   # held by the OTHER hand — diagnostic for "can't grab" reports
 
 	# Unchanged? Just exit
 	if closest_body == new_closest_body:
@@ -281,6 +367,7 @@ func _physics_process(delta) -> void:
 				pickup_pressed = true
 			else:
 				if pickup_value <= quick_release_value:
+					_gdiag("RELEASE %s obj=%s#%d (quick)" % [_side(), picked_up_body.name, picked_up_body.get_instance_id()])
 					picked_up_body.let_go()
 					picked_up_body = null
 					release_started_msec = 0
@@ -292,6 +379,7 @@ func _physics_process(delta) -> void:
 					release_started_msec = now_msec
 
 				if now_msec - release_started_msec >= release_grace_msec:
+					_gdiag("RELEASE %s obj=%s#%d (grace)" % [_side(), picked_up_body.name, picked_up_body.get_instance_id()])
 					picked_up_body.let_go()
 					picked_up_body = null
 					release_started_msec = 0
@@ -305,6 +393,15 @@ func _physics_process(delta) -> void:
 	if not picked_up_body and not was_pickup_pressed and pickup_pressed and closest_body:
 		picked_up_body = closest_body
 		picked_up_body.pick_up(self)
+		_gdiag("PICKUP %s obj=%s#%d at=%s" % [_side(), picked_up_body.name, picked_up_body.get_instance_id(), str(picked_up_body.global_position)])
+		_blocked_logged = false
+	# Diagnostic: pinching hard, nothing grabbed, but a held body is right here = the
+	# "I'm pinching but can't grab it" case (object held by the other hand).
+	elif pickup_pressed and not picked_up_body and closest_body == null and _blocked_held != null and not _blocked_logged:
+		_gdiag("GRAB_BLOCKED %s reason=held_by_other obj=%s#%d holder=%s" % [
+			_side(), _blocked_held.name, _blocked_held.get_instance_id(),
+			str(_blocked_held.picked_up_by.get_parent().tracker) if _blocked_held.picked_up_by != null and _blocked_held.picked_up_by.get_parent() != null else "?"])
+		_blocked_logged = true
 
 	# Remember our state for the next frame
 	was_pickup_pressed = pickup_pressed
