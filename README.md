@@ -1,12 +1,14 @@
-# godot-avp-cascade
+# Cascade Countdown
 
-**Cascade Countdown** — a self-running physics + procedural-audio demo for Apple Vision Pro, built on the Godot game engine via Apple's official upstream visionOS XR contribution (PR [#109975](https://github.com/godotengine/godot/pull/109975)).
+**Cascade Countdown** — a hand-tracked physics arcade game for Apple Vision Pro, built on the Godot game engine via Apple's official upstream visionOS XR contribution (PR [#109975](https://github.com/godotengine/godot/pull/109975)).
 
-Twenty-five emissive cubes — 8-colour fire-plasma palette, randomised sizes — drop onto a tilted catch plate in your immersive space. Each collision triggers a procedurally-synthesized chime (plate chimes have an octave harmonic; cube-on-cube tinks are brighter and shorter). Reach in with your hand and **pinch to grab and throw** any cube. Walk around it.
+> ⚠️ **Not affiliated with the Godot Foundation.** Cascade Countdown is an independent app made by Agile Lens. It is built *with* the open-source Godot engine but is **not** created, published, endorsed, or sponsored by the Godot Foundation. "Godot" is a trademark of the Godot Foundation.
+
+Emissive cubes — 8-colour fire-plasma palette, randomised sizes — cascade down through spinning bumpers and a prism splitter onto tilted catch plates in your immersive space. Reach in and **pinch to grab and throw** any cube into the goal ring; keep them alive and bouncing to rack up points, then poke **START** for a 30-second countdown time-attack with a procedural soundtrack. Every collision is a synthesized chime pitch-snapped to the key, so the chaos harmonises into a tune. Walk around it.
 
 The first publicly-documented Godot `RigidBody3D` physics scene rendering in immersive mode on real AVP at locked 90 FPS, with working hand-tracking pickup.
 
-![Cascade demo](captures/cascade.gif)
+![Cascade Countdown on Apple Vision Pro](captures/cascade.gif)
 
 ## ▶️ Try it on Apple Vision Pro (TestFlight)
 
@@ -21,7 +23,7 @@ Hand tracking is an **engine capability, not a project setting** — no amount o
 | Engine | Hand tracking | Use it if… |
 |--------|:---:|--------|
 | [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot) `apple/visionos-xr` — **Apple's official PR branch** | ❌ render-only | you only want the falling cascade (no grab/throw) |
-| [Clancey/godot](https://github.com/Clancey/godot/tree/visionos_master_pr) `visionos_master_pr` — HEAD `2b2f749` | ✅ pinch grab + throw | you want the **full demo as shown above** |
+| [Clancey/godot](https://github.com/Clancey/godot/tree/visionos_master_pr) `visionos_master_pr` — HEAD `2b2f749` | ✅ pinch grab + throw | you want the **full game as shown above** |
 
 **If the cubes render but you can't grab anything and you never saw a hand-tracking permission prompt — you're on the rsanchezsaez engine. Switch to Clancey's fork.** The missing permission prompt is the tell: rsanchezsaez never asks visionOS for hand data because the hand-tracking code isn't compiled in. See [Troubleshooting](#troubleshooting).
 
@@ -39,11 +41,11 @@ Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDe
 - Mixed immersion (passthrough) — cubes composite into your real room
 - **Pinch-to-grab and throw** any cube with either hand
 
-## What this demo proves
+## What Cascade Countdown proves
 
 Most public Godot-on-AVP material to date shows either: (a) flat-plane Godot apps in a shared-space window, (b) the rsanchezsaez reference scene (a third-person platformer ported from mobile VR), or (c) the GodotVision/SwiftGodotKit RealityKit-bridged approach.
 
-This is the first published example of:
+Cascade Countdown is the first published example of:
 
 - `RigidBody3D` simulation running in immersive mode on AVP via the Apple-official native path
 - `AudioStreamGenerator` + `push_frame` real-time procedural audio synchronized to physics collisions
@@ -55,7 +57,7 @@ This is the first published example of:
 ```
 test-project/
   main_v2.tscn        # XR boilerplate scene; gameplay built procedurally in script
-  main_v2.gd          # Cascade script — spawn, physics, audio, hand setup
+  main_v2.gd          # Cascade Countdown script — spawn, physics, audio, hand setup, scoring
   pickup/
     pickup_handler.gd # PickupHandler3D — pinch detection, fingertip anchoring (Marshall Nowak)
     pickup_able_body.gd # PickupAbleBody3D — grab/snap/throw logic with velocity tracking
@@ -129,7 +131,7 @@ For **hand tracking**, build from [Clancey/godot](https://github.com/Clancey/god
 Recipe + gotchas documented in detail at:
 - [agile-lens-kb/intelligence/techniques/godot-visionos-xr.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-visionos-xr.md) — full engine-build gotchas, scene-recipe details, `XROrigin3D.current=true` requirement
 - [agile-lens-kb/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md) — engine-fork requirement, the version-gap fix, swap recipe
-- [agile-lens-kb/intelligence/techniques/godot-avp-falling-cascade.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-falling-cascade.md) — this demo's gotchas, perf numbers, code patterns
+- [agile-lens-kb/intelligence/techniques/godot-avp-falling-cascade.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-falling-cascade.md) — Cascade Countdown's gotchas, perf numbers, code patterns
 
 The engine source tree is `.gitignore`'d here (regenerable from the fork above).
 
@@ -160,7 +162,7 @@ In mixed immersion, visionOS CompositorServices requires **alpha == 0 wherever d
 - Engine: [Godot](https://godotengine.org/) — open source
 - visionOS XR port: [Ricardo Sanchez-Saez @ Apple](https://github.com/rsanchezsaez) + community contributors (huisedenanhai, stuartcarnie, BastiaanOlij)
 - **Hand tracking pickup system:** [Marshall Nowak (Nocxr)](https://github.com/Nocxr) @ Agile Lens — `PickupHandler3D` / `PickupAbleBody3D` from [visionosxr_hand_tracking](https://github.com/Clancey/godot/tree/visionos_master_pr), ported from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
-- Demo + writeup: [Agile Lens](https://agilelens.com/)
+- Cascade Countdown game + writeup: [Agile Lens](https://agilelens.com/)
 
 ## License
 
