@@ -2,7 +2,7 @@
 
 **Cascade Countdown** — a hand-tracked physics arcade game for Apple Vision Pro, built on the Godot game engine via Apple's official upstream visionOS XR contribution (PR [#109975](https://github.com/godotengine/godot/pull/109975)).
 
-> ⚠️ **Not affiliated with the Godot Foundation.** Cascade Countdown is an independent app made by Agile Lens. It is built *with* the open-source Godot engine but is **not** created, published, endorsed, or sponsored by the Godot Foundation. "Godot" is a trademark of the Godot Foundation.
+> ⚠️ **Not affiliated with the Godot Foundation.** Cascade Countdown is an independent app by Alex Coulombe. It is built *with* the open-source Godot engine but is **not** created, published, endorsed, or sponsored by the Godot Foundation. "Godot" is a trademark of the Godot Foundation.
 
 Emissive cubes — 8-colour fire-plasma palette, randomised sizes — cascade down through spinning bumpers and a prism splitter onto tilted catch plates in your immersive space. Reach in and **pinch to grab and throw** any cube into the goal ring; keep them alive and bouncing to rack up points, then poke **START** for a 30-second countdown time-attack with a procedural soundtrack. Every collision is a synthesized chime pitch-snapped to the key, so the chaos harmonises into a tune. Walk around it.
 
@@ -128,12 +128,7 @@ For **hand tracking**, build from [Clancey/godot](https://github.com/Clancey/god
 1. Use a matched editor+lib pair (preferred), **or**
 2. Set `script_export_mode=0` (Text) in `export_presets.cfg` so the runtime compiles scripts from source and the token format no longer has to match. This repo currently uses Text mode because its editor (4.6.3) and lib (Clancey 4.6.2) differ.
 
-Recipe + gotchas documented in detail at:
-- [agile-lens-kb/intelligence/techniques/godot-visionos-xr.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-visionos-xr.md) — full engine-build gotchas, scene-recipe details, `XROrigin3D.current=true` requirement
-- [agile-lens-kb/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-hand-tracking-engine-swap.md) — engine-fork requirement, the version-gap fix, swap recipe
-- [agile-lens-kb/intelligence/techniques/godot-avp-falling-cascade.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-falling-cascade.md) — Cascade Countdown's gotchas, perf numbers, code patterns
-
-The engine source tree is `.gitignore`'d here (regenerable from the fork above).
+The key engine-build gotchas (the `XROrigin3D.current=true` requirement, the mobile-renderer constraint, and the editor/lib version-match rule) are all captured in this README — see [Troubleshooting](#troubleshooting) and [Known limitations](#known-limitations). The engine source tree is `.gitignore`'d here (regenerable from the fork above).
 
 ## Real Persona arms (the `upper_limb.txt` toggle)
 
@@ -163,7 +158,7 @@ Three gotchas, each of which costs a compile if you miss it:
 2. **Use classic `ObservableObject` + `@Published` + `@StateObject`, not `@Observable`.** The fork's Swift build is a hand-rolled `swift-frontend` invocation with no macro-plugin paths, so the `@Observable` macro fails to expand. `import Combine`.
 3. **The immersive content is `CompositorContent`, not a `View`** — `.task` / `.onChange` / `.onReceive` aren't available on the `CompositorLayer { … }` closure, so the poll must live in the model's own `Task { @MainActor … }`, not a view `.task`. The build is `-swift-version 6 -warnings-as-errors`, so it must be strict-concurrency-clean.
 
-Full implementation (with the resolver code and build notes) is in the KB: [godot-avp-upper-limb-toggle.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-upper-limb-toggle.md).
+The complete resolver — `upperLimbVisibilityFromFile()` (file → Info.plist → controller default → `.automatic`) and the `@MainActor` 500 ms poll on `UpperLimbVisibilityModel` — lives in `platform/visionos/app_visionos.swift` in the Clancey fork. Diff it there against the stock file to apply the patch.
 
 ## Troubleshooting
 
@@ -192,8 +187,8 @@ In mixed immersion, visionOS CompositorServices requires **alpha == 0 wherever d
 
 - Engine: [Godot](https://godotengine.org/) — open source
 - visionOS XR port: [Ricardo Sanchez-Saez @ Apple](https://github.com/rsanchezsaez) + community contributors (huisedenanhai, stuartcarnie, BastiaanOlij)
-- **Hand tracking pickup system:** [Marshall Nowak (Nocxr)](https://github.com/Nocxr) @ Agile Lens — `PickupHandler3D` / `PickupAbleBody3D` from [visionosxr_hand_tracking](https://github.com/Clancey/godot/tree/visionos_master_pr), ported from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
-- Cascade Countdown game + writeup: [Agile Lens](https://agilelens.com/)
+- **Hand tracking pickup system:** [Marshall Nowak (Nocxr)](https://github.com/Nocxr) — `PickupHandler3D` / `PickupAbleBody3D` from [visionosxr_hand_tracking](https://github.com/Clancey/godot/tree/visionos_master_pr), ported from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
+- Cascade Countdown game + writeup: [Alex Coulombe (@ibrews)](https://github.com/ibrews)
 
 ## License
 

@@ -4,12 +4,12 @@ You are working on an Apple Vision Pro Godot pilot. Read this before doing anyth
 
 ## Read the KB first
 
-The bulk of project knowledge lives in the Agile Lens knowledge base, not in this repo. Before working, read in this order:
+The bulk of project knowledge lives in the maintainer's private knowledge base, not in this repo. Before working, read these (paths are within that KB):
 
-1. [`intelligence/techniques/godot-visionos-xr.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-visionos-xr.md) — engine build/deploy recipe, all the gotchas, the **`XROrigin3D.current=true` silent killer**, the alpha-0 background rule
-2. [`intelligence/techniques/godot-avp-falling-cascade.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-falling-cascade.md) — this specific demo's patterns, perf numbers, gotchas (contact_monitor + body_entered)
-3. [`intelligence/research/godot-avp-demo-landscape.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/research/godot-avp-demo-landscape.md) — public bar, ecosystem context
-4. [`context/team/team-marshall.md`](https://github.com/AgileLens/agile-lens-kb/blob/master/context/team/team-marshall.md) — Marshall Nowak (aka Nocxr) is doing complementary in-house work on Clancey's hand-tracking fork
+1. `intelligence/techniques/godot-visionos-xr.md` — engine build/deploy recipe, all the gotchas, the **`XROrigin3D.current=true` silent killer**, the alpha-0 background rule
+2. `intelligence/techniques/godot-avp-falling-cascade.md` — this specific demo's patterns, perf numbers, gotchas (contact_monitor + body_entered)
+3. `intelligence/research/godot-avp-demo-landscape.md` — public bar, ecosystem context
+4. `context/team/team-marshall.md` — Marshall Nowak (aka Nocxr) is doing complementary in-house work on Clancey's hand-tracking fork
 
 If you're confused about Godot on AVP, the KB has the answer. Do not improvise around the KB without first checking it.
 
