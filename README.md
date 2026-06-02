@@ -135,6 +135,36 @@ Recipe + gotchas documented in detail at:
 
 The engine source tree is `.gitignore`'d here (regenerable from the fork above).
 
+## Real Persona arms (the `upper_limb.txt` toggle)
+
+The **HANDS** button cycles `MESH → BOTH → REAL`. The first two (the virtual GLTF hand mesh) work out of the box. The **REAL** mode — compositing your actual Persona arms over the scene — is controlled by SwiftUI's `.upperLimbVisibility(...)` on the `ImmersiveSpace`, which is **baked at build time** from the `GodotUpperLimbVisibility` key in `Info.plist`. To flip it **live at runtime**, you need a small engine-side change. Without that change the app still runs fine — it just always shows the mesh hands, and the REAL/BOTH modes won't reveal your real arms.
+
+There are two paths:
+
+**Option A — static (no recompile).** Set the visibility once in `out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist`:
+```xml
+<key>GodotUpperLimbVisibility</key>
+<string>visible</string>   <!-- or "hidden" / "automatic" -->
+```
+This bakes the choice into the build; it can't be changed without rebuilding the app.
+
+**Option B — live runtime toggle (engine recompile).** The app writes the user's choice to `user://upper_limb.txt` (which maps to `Documents/upper_limb.txt` on visionOS), and the engine polls that file ~2×/sec and re-applies `.upperLimbVisibility` live. The GDScript side already ships in this repo:
+```gdscript
+# main_v2.gd — _write_arms_pref()
+var f := FileAccess.open("user://upper_limb.txt", FileAccess.WRITE)
+if f != null:
+    f.store_string("visible" if _real_arms_visible else "hidden")  # or "automatic"
+    f.close()
+```
+The engine side is a change to **`platform/visionos/app_visionos.swift`** (in your Godot fork checkout): an `ObservableObject` model whose `@Published var visibility` is refreshed by a `@MainActor` poll loop that reads `Documents/upper_limb.txt`, with the `ImmersiveSpace` ending in `.upperLimbVisibility(limbModel.visibility)`. Rebuild `libgodot.a` afterward.
+
+Three gotchas, each of which costs a compile if you miss it:
+1. **`app_visionos.swift` is compiled *into* `libgodot.a`** (via `platform/visionos/SCsub`'s `Glob("*.swift")`), so this is an **engine recompile**, not an app-target edit. The generated Xcode project only carries `dummy.swift`.
+2. **Use classic `ObservableObject` + `@Published` + `@StateObject`, not `@Observable`.** The fork's Swift build is a hand-rolled `swift-frontend` invocation with no macro-plugin paths, so the `@Observable` macro fails to expand. `import Combine`.
+3. **The immersive content is `CompositorContent`, not a `View`** — `.task` / `.onChange` / `.onReceive` aren't available on the `CompositorLayer { … }` closure, so the poll must live in the model's own `Task { @MainActor … }`, not a view `.task`. The build is `-swift-version 6 -warnings-as-errors`, so it must be strict-concurrency-clean.
+
+Full implementation (with the resolver code and build notes) is in the KB: [godot-avp-upper-limb-toggle.md](https://github.com/AgileLens/agile-lens-kb/blob/master/intelligence/techniques/godot-avp-upper-limb-toggle.md).
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -152,6 +182,7 @@ The engine source tree is `.gitignore`'d here (regenerable from the fork above).
 - **Manual app launch on the headset.** `xcrun devicectl device process launch` returns `connection invalidated` for immersive-space apps. The user has to tap the icon.
 - **MSAA does not work on this branch yet.** Blocked on Godot PR [#78598](https://github.com/godotengine/godot/pull/78598). Don't enable it. (It's *not* needed for clean passthrough edges — see the depth-bias fix below.)
 - **Hand-as-collision-mesh not yet implemented.** The hand can grab and throw but does not act as a physics collider for passive deflection.
+- **Live "REAL arms" toggle needs an engine patch.** The HANDS button's REAL/BOTH modes only reveal your real Persona arms if the engine polls `upper_limb.txt` — see [Real Persona arms](#real-persona-arms-the-upper_limbtxt-toggle). On a stock build, set visibility statically via the `GodotUpperLimbVisibility` Info.plist key instead.
 
 ## Mixed-reality passthrough: the blocky-alpha-halo fix
 
