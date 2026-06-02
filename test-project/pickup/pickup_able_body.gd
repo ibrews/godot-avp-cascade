@@ -82,16 +82,26 @@ var _gdiag_frame := 0
 #   0 RIGID+GATE  + glitch-gate (hold through multi-frame tracking bursts) + a bit more smoothing
 #   1 RIGID       de-spiked rigid only, tight follow — the A/B baseline
 static var grab_mode : int = 0
-const GRAB_MODE_NAMES := ["RESPONSIVE", "DAMPED"]
+# One-handed grab approaches, cycled live by the in-world DEBUG button to find what feels best.
+# Two findings shaped these: (1) telemetry (ORICMP) showed the PALM joint orientation SPIKES ~190
+# rad/s under motion (p90 187) while the WRIST stays ~10x calmer (p90 16); (2) the grab must be
+# INDEX-INDEPENDENT — pinching/pulling the index (before it triggers a release) must not move or
+# rotate the object. The THUMB is the stable side, so anchoring to it gives that for free.
+#   0 THUMB   object is RIGID to the THUMB-TIP joint for BOTH position (anchor) and rotation, so
+#             moving the index (pinch/pull, pre-release) does nothing — only the thumb carries it
+#   1 WRIST   rotation from the WRIST joint; position = the existing de-spiked wrist-rigid anchor
+#   2 PALM    rotation from the PALM joint (v0.9.24 baseline — spikes under motion; for reference)
+#   3 LOCKED  no one-handed rotation; object holds its grab orientation (rotate with two hands)
+const MODE_THUMB := 0
+const MODE_WRIST := 1
+const MODE_PALM := 2
+const MODE_LOCKED := 3
+const GRAB_MODE_NAMES := ["THUMB", "WRIST", "PALM", "LOCKED"]
 
-# Per-mode follow tuning. The raw hand pose (especially ORIENTATION) is noisy on this engine path,
-# so there's a hard lag-vs-jitter tradeoff — expose it as a live toggle instead of guessing one point:
-#   0 RESPONSIVE  snappy (high cutoffs) — tracks flicks/drags ~1:1; shows raw jitter in noisy moments
-#   1 DAMPED      heavy smoothing — calm/stable but laggy on fast moves (use when tracking is poor)
 func _mode_pos_cutoff() -> float:
-	return 9.0 if grab_mode == 0 else 5.0
+	return 9.0   # position follow is solid across modes
 func _mode_rot_cutoff() -> float:
-	return 4.0 if grab_mode == 0 else 2.0
+	return 4.0
 
 func _gdiag(line: String) -> void:
 	if not GRAB_DIAG:
@@ -142,6 +152,11 @@ var _filt_basis : Basis = Basis.IDENTITY
 var _filt_vel : Vector3 = Vector3.ZERO      # filtered linear speed (m/s)
 var _filt_avel : float = 0.0                # filtered angular speed (rad/s)
 var _grab_rot_offset : Basis = Basis.IDENTITY   # held body's basis relative to the holder, at grab
+var _locked_basis : Basis = Basis.IDENTITY      # LOCKED mode: the world orientation to hold (set at seed)
+# Set by the handler each held frame: true while the pinch is OPEN. A freeze_on_release body holds
+# its pose while suspended (freeze-on-open → clean release, no thumb-drag, no re-pinch jump);
+# throwable bodies ignore it (they need the release motion for throw velocity).
+var follow_suspended := false
 # The GRABBED POINT, expressed in the body's own (unscaled, mesh-local) frame at grab time.
 # The follow offsets the body origin so this exact point stays pinned under the finger and the
 # object rotates ABOUT it — instead of snapping the body CENTRE onto the fingertip (which made
@@ -204,6 +219,11 @@ func _process(delta: float) -> void:
 		return  # main_v2 two-hand scale owns the transform this frame
 	if not is_picked_up():
 		return
+	# Freeze-on-open: a place-only body (freeze_on_release) holds its pose while the pinch is open,
+	# so the opening hand can't drag it (clean release) and a re-pinch resumes from here. The handler
+	# sets follow_suspended from the live pinch; throwable bodies keep following (for throw velocity).
+	if follow_suspended and freeze_on_release:
+		return
 	var holder := picked_up_by as Node3D
 	if holder == null:
 		return
@@ -218,9 +238,22 @@ func _process(delta: float) -> void:
 	# the object off your finger (the "it doesn't stay locked, swings all over" bug). The pivot
 	# never trips the cap, so the grab point stays locked through arbitrary rotation.
 	# _filt_pos now holds the filtered PIVOT (grab-point world pos), not the body origin.
+	# Pivot + orientation SOURCES, per grab_mode (see the mode table):
+	#   THUMB: both come from the THUMB-TIP joint transform (object rigid to the thumb tip →
+	#     index-independent).  WRIST/PALM: pivot = the de-spiked wrist anchor (holder origin),
+	#     rotation = the WRIST/PALM joint basis.  LOCKED: pivot = anchor, orientation frozen at grab.
 	var target_pivot := holder_xform.origin
-	var finger_anchor := holder_xform.origin   # the RAW fingertip pinch this frame (pre-clamp)
-	var target_basis := (holder_xform.basis.orthonormalized() * _grab_rot_offset).orthonormalized()
+	var target_basis : Basis
+	var thumb_x = _thumb_xform(holder)   # non-null only in THUMB mode when the thumb tip is available
+	if thumb_x != null:
+		var tx : Transform3D = thumb_x
+		target_pivot = tx.origin
+		target_basis = (tx.basis.orthonormalized() * _grab_rot_offset).orthonormalized()
+	elif grab_mode == MODE_LOCKED:
+		target_basis = _locked_basis   # hold the grab orientation; no one-handed rotation (use two hands)
+	else:
+		target_basis = (_orient_basis(holder) * _grab_rot_offset).orthonormalized()
+	var finger_anchor := target_pivot   # the RAW anchor this frame (pre-clamp) — for slip telemetry
 	var clamp_lin := false
 	var clamp_ang := false
 	var raw_ang_speed := 0.0   # rad/s of the RAW target basis this frame (orientation-glitch telemetry)
@@ -234,6 +267,7 @@ func _process(delta: float) -> void:
 		_grab_scale = global_transform.basis.get_scale()
 		# Seed the filtered pivot from the grab point's CURRENT world position so it eases in.
 		_filt_basis = global_transform.basis.orthonormalized()
+		_locked_basis = _filt_basis   # LOCKED mode target: the orientation at (re)grab, held world-fixed
 		_filt_pos = global_position + _filt_basis.scaled(_grab_scale) * _grab_point_local
 		_filt_vel = Vector3.ZERO
 		_filt_avel = 0.0
@@ -299,6 +333,32 @@ func _oe_alpha(cutoff: float, dt: float) -> float:
 	return 1.0 / (1.0 + tau / dt)
 
 
+# Live orientation source for the current grab_mode: the WRIST joint basis (modes 0/1) or the PALM
+# joint basis (mode 2), read from the handler. The held body rotates with this instead of the
+# controller "aim" basis, which is pinch-derived and noisy. Telemetry: the wrist is ~10x calmer than
+# the palm under motion (palm spikes to ~190 rad/s), so wrist is the default. Falls back to the aim
+# basis only if the joint orientation has never been available (e.g. physical controller). LOCKED
+# (mode 3) doesn't call this — it holds _locked_basis (see _process).
+func _orient_basis(holder: Node3D) -> Basis:
+	if holder != null and holder.has_method("joint_orientation_basis"):
+		var joint := XRHandTracker.HAND_JOINT_PALM if grab_mode == MODE_PALM else XRHandTracker.HAND_JOINT_WRIST
+		var b = holder.joint_orientation_basis(joint)
+		if b != null:
+			var bb : Basis = b
+			return bb.orthonormalized()
+	return holder.global_transform.basis.orthonormalized() if holder != null else Basis.IDENTITY
+
+
+# Thumb-tip world transform from the handler (THUMB mode only), or null. THUMB mode pins the object
+# to the THUMB TIP for BOTH position (the pivot/anchor) and rotation, so moving the INDEX finger
+# (pinch or pull, before it triggers a release) doesn't move or rotate the object at all — only the
+# thumb carries it. The handler holds the last good value through a 1-frame dropout (no snap).
+func _thumb_xform(holder: Node3D):
+	if grab_mode == MODE_THUMB and holder != null and holder.has_method("thumb_anchor_xform"):
+		return holder.thumb_anchor_xform()
+	return null
+
+
 # Pick this object up.
 func pick_up(pick_up_by) -> void:
 	# Already picked up? Can't pick up twice.
@@ -341,20 +401,38 @@ func pick_up(pick_up_by) -> void:
 	if quick_regrab:
 		# A transient finger-splay flicked the pinch "open" and it re-fired — NOT a deliberate
 		# let-go. KEEP the original grab point (don't re-anchor to a new spot on the object) and
-		# cancel any velocity the brief release imparted, so the object doesn't drift/throw.
+		# cancel any velocity the brief release imparted, so the object doesn't drift/throw. But
+		# RECAPTURE the rotation offset fresh vs the CURRENT holder+body basis: the stale offset was
+		# captured at the ORIGINAL grab, and on re-grab the holder basis differs (orientation noise +
+		# elapsed time), so replaying holder.basis * stale_offset snapped the object up to ~157°
+		# (grab_snap.txt). Recapturing makes the frame-0 follow target equal the body's CURRENT
+		# basis → no rotation snap on re-grab; scale is re-adopted by the follow reseed below.
 		linear_velocity = Vector3.ZERO
 		angular_velocity = Vector3.ZERO
+		var tx_rg = _thumb_xform(holder)
+		if tx_rg != null:
+			var trg : Transform3D = tx_rg
+			_grab_rot_offset = trg.basis.orthonormalized().inverse() * current_transform.basis.orthonormalized()
+		elif holder != null:
+			_grab_rot_offset = _orient_basis(holder).inverse() * current_transform.basis.orthonormalized()
 	elif holder != null:
-		_grab_rot_offset = holder.global_transform.basis.orthonormalized().inverse() * current_transform.basis.orthonormalized()
-		# Where on the body did we grab? Map the holder (fingertip/pinch) world point into the
-		# body's local mesh frame so the follow can keep THAT point under the finger and rotate
-		# the body about it. affine_inverse divides out the body's scale, giving unscaled local.
-		_grab_point_local = current_transform.affine_inverse() * holder.global_transform.origin
+		# Where on the body did we grab, and the orientation offset from the source frame? THUMB mode
+		# anchors BOTH to the thumb-tip transform (index-independent); WRIST/PALM use the holder anchor
+		# for the point and the joint basis for rotation. affine_inverse divides out the body's scale.
+		var tx_g = _thumb_xform(holder)
+		if tx_g != null:
+			var tg : Transform3D = tx_g
+			_grab_rot_offset = tg.basis.orthonormalized().inverse() * current_transform.basis.orthonormalized()
+			_grab_point_local = current_transform.affine_inverse() * tg.origin
+		else:
+			_grab_rot_offset = _orient_basis(holder).inverse() * current_transform.basis.orthonormalized()
+			_grab_point_local = current_transform.affine_inverse() * holder.global_transform.origin
 		_grab_scale = current_transform.basis.get_scale()
 	else:
 		_grab_rot_offset = Basis.IDENTITY
 		_grab_point_local = Vector3.ZERO
 		_grab_scale = current_transform.basis.get_scale()
+	follow_suspended = false   # a fresh grab follows actively until the handler reports the pinch open
 	_follow_ready = false   # seed the filter from the current pose on the first frame
 	if holder != null:
 		_gdiag("GRABBED obj=%s#%d body=%s anchor=%s gp_local=%s scale=%s regrab=%d" % [

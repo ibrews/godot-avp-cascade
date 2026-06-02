@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.9.22-responsive"  # kill the lag: removed the anchor glitch-gate (throttled fast drags to ~1/7) + responsive follow (pos 9Hz/rot 4Hz, ang clamp 18). DEBUG button toggles RESPONSIVE vs DAMPED
+const APP_VERSION := "v0.9.27-thumbfix"  # THUMB grab refined: (1) median-of-3 de-spike on the thumb-tip anchor kills the ~15-20cm grab jump (raw thumb pos glitched on ~14% of grabs); (2) freeze-on-open — plates/wall hold pose the instant the pinch opens so the releasing hand doesn't drag them (clean release; cubes still throw). Modes still cycle THUMB/WRIST/PALM/LOCKED
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -2318,9 +2318,9 @@ func _save_best() -> void:
 		f.store_line(str(_best_score))
 		f.close()
 
-# Big in-world DEBUG button to A/B the grab follow live. Poke CYCLE to toggle
-# PickupAbleBody3D.grab_mode (RESPONSIVE = snappy follow / DAMPED = heavy smoothing for poor
-# tracking); the readout shows the active mode. Temporary tuning aid.
+# Big in-world DEBUG button to A/B the one-handed grab behavior live. Poke CYCLE to step
+# PickupAbleBody3D.grab_mode through THUMB / WRIST / PALM / LOCKED (see the mode table in
+# pickup_able_body.gd); the readout shows the active mode. Temporary tuning aid.
 func _build_grabmode_debug() -> void:
 	var root := Node3D.new()
 	root.name = "GrabModeDebug"

@@ -2,6 +2,179 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ⚠️ STATE (2026-06-02, session 7d) — v0.9.27-thumbfix: THUMB anchor de-spike + freeze-on-open — READ FIRST
+
+Device app **v0.9.27-thumbfix** built + installed (validate clean; PCK `301d6dbd` parity-matched
+`gidtuid…`). **Awaiting Alex's re-test.** Still cycles THUMB/WRIST/PALM/LOCKED (THUMB default).
+
+**Alex's v0.9.26 feedback:** THUMB wins for anchor + rotation ("locks into a spot on the plate";
+WRIST's grab point visibly DARTS on the plate as you rotate = wrist-orientation noise amplified
+through the long wrist→pinch offset into position wander). THUMB's two defects: (1) sticky release
+("stays resting on my thumb" — the opening hand drags the thumb-anchored object out); (2) the plate
+sometimes JUMPS to a new spot on press/release. Logs confirmed (2): the raw thumb-tip POSITION
+glitches at the grab instant — 3/21 THUMB grabs spiked |body−anchor| to 0.35–0.40 m (normal 0.19 m)
+→ a wrong grab point baked in → ~15–20 cm jump.
+
+**v0.9.27 fixes (THUMB anchor kept — it's the winner):**
+- **De-spike the thumb-tip anchor**: median-of-3 on the thumb-tip POSITION (same trick as the
+  fingertip anchor), sampled every render frame in the handler (`_sample_thumb_anchor` /
+  `thumb_anchor_xf`), exposed via `thumb_anchor_xform()`; holds last-good through a dropout. Kills
+  the grab jump. Orientation passes through (body slerp+clamp smooth it).
+- **Freeze-on-open** (general, gated to `freeze_on_release` bodies = plates/wall): the handler sets
+  `picked_up_body.follow_suspended = true` the instant the pinch opens; the body holds its pose
+  while suspended (early-return in `_process`) instead of following the opening hand → clean release,
+  no thumb-drag, and a re-pinch resumes from the held pose (no jump). Throwable cubes don't set
+  `freeze_on_release` so they keep following (throw velocity preserved). Handler sets it false while
+  pinched; `pick_up` resets it false.
+
+**HEADSET RE-TEST (Alex — `v0.9.27-thumbfix` on the panel; default THUMB):**
+1. Repeatedly press/release a plate on the same spot — should NOT jump to a new location anymore.
+2. Grab a plate, position it, open to release — it should stay where you opened (no "resting on the
+   thumb" drag-out).
+3. Rotate one-handed — grab point should stay locked on the plate (as before).
+4. Cubes should still THROW (freeze-on-open doesn't apply to them).
+If THUMB now feels right → declare it the winner; I collapse to it, strip all modes + scaffolding,
+TestFlight.
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7c) — v0.9.26-thumbpin: ONE-HANDED GRAB A/B (4 MODES) — READ FIRST
+
+Device app **v0.9.26-thumbpin** built + installed (validate clean; PCK `b4b21a19` parity-matched
+`gidtuid…`; clean install). **Awaiting Alex's A/B feel-test via the in-world DEBUG button.**
+
+**Why this build:** v0.9.24-palmrot's palm-rotation fixed the stationary "walks on every pinch"
+problem, but Alex reported (a) one-handed ROTATION still felt "ridiculous" and (b) pulling the
+INDEX away from the thumb (pre-release) moved/rotated the object. ORICMP telemetry from v0.9.24
+explains (a): the **PALM orientation SPIKES ~190 rad/s under motion** (p90 187, max 199) while the
+**WRIST stays ~10x calmer** (p90 16, max 64); aim was median 13.7. So palm was a poor rotation
+source under motion. For (b), Alex's fix: anchor to the **THUMB TIP** (the stable side) so index
+movement is irrelevant.
+
+**The DEBUG button now cycles 4 one-handed grab modes** (`PickupAbleBody3D.grab_mode`,
+GRAB_MODE_NAMES, label on the DEBUG panel). Default = mode 0 THUMB:
+- **0 THUMB** (default): object RIGID to the `HAND_JOINT_THUMB_TIP` transform for BOTH the
+  position pivot AND rotation. Moving the index (pinch/pull, pre-release) does nothing — only the
+  thumb carries/rotates it. Capture of `_grab_rot_offset` + `_grab_point_local` and the _process
+  pivot/basis all come from the thumb-tip transform. Handler exposes `joint_world_transform(joint)`
+  (last-good hold per joint). This directly answers Alex's index-independence requirement.
+- **1 WRIST**: rotation from the WRIST joint basis; position = existing de-spiked wrist-rigid
+  anchor. (Also index-independent; the data-calmest rotation source.)
+- **2 PALM**: rotation from PALM joint (the v0.9.24 baseline — spikes under motion; reference).
+- **3 LOCKED**: no one-handed rotation; holds grab orientation (`_locked_basis`); rotate w/ 2 hands.
+
+Implementation: handler `joint_orientation_basis(joint)` + `joint_world_transform(joint)` (per-joint
+last-good dict cache, rendered through XROrigin). Body `_orient_basis(holder)` picks wrist/palm by
+mode; `_thumb_xform(holder)` returns the thumb-tip transform in THUMB mode (else null → other
+modes). ORICMP telemetry (palm/wrist/aim angular speed) still logging. `_locked_basis` seeded at
+the follow seed.
+
+**HEADSET A/B (Alex — `v0.9.26-thumbpin` on the info panel):**
+1. THUMB (default): grab a plate; pull your index away from the thumb WITHOUT releasing → it must
+   NOT move or rotate. Rotate your whole hand → the object should rotate with your thumb.
+2. Poke the DEBUG · GRAB MODE button to cycle THUMB → WRIST → PALM → LOCKED; compare the feel of
+   one-handed rotation in each. (Readout shows the active mode.)
+3. Tell me which feels best → I lock it in as the single behavior and strip the other modes + all
+   debug scaffolding, then TestFlight.
+
+After Alex picks: collapse to the chosen mode, strip GRAB_DIAG/ORICMP/DEBUG button/dead probes,
+update KB `godot-avp-grab-by-point.md`, ship.
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7b) — v0.9.24-palmrot: ROTATION SOURCE = PALM JOINT — READ FIRST
+
+Device app **v0.9.24-palmrot** built + installed to AVP (validate clean; PCK sha `d23a8562`
+parity-matched `gidtuid…`; install clean, no retry). **Awaiting Alex's headset feel-test.**
+
+**What v0.9.23 telemetry (grab_diag.txt) proved on device:**
+- **Issue 1 (false release): FIXED.** 55 `STICKYHOLD obs=0` lines = held *through* dropouts; the
+  52 `(grace)` releases now only fire when `obs=1` (well-observed). The timer-reset fix works.
+- **Issue 2 (rotation): my v0.9.23 no-snap fix was INSUFFICIENT.** Alex re-pinched the SAME spot
+  repeatedly and the object kept ROTATING. Root cause (confirmed by telemetry, exactly Alex's
+  hypothesis): the held body's rotation followed the **controller "aim" basis** (`holder.basis`,
+  inherited from the XRController3D pose), which is derived from the pinch geometry and is
+  violently noisy — HOLD `ang_spd` **median 20.1 rad/s (~1150°/s), p90 93, max 261** while
+  "holding still"; the angular spike-clamp `clampA` fired on **608/1108 = 55%** of held frames.
+  Each pinch/open swung the aim basis → the object's orientation walked every grab/release.
+
+**The v0.9.24 fix (Alex's call: use a stable bone, not the fingers/wrist — the PALM):**
+- `pickup_handler.gd`: new `grab_orientation_basis()` returns the **`HAND_JOINT_PALM`** world
+  basis (rendered through the XROrigin like the position anchor), holding the last good palm
+  through a 1-frame flicker so the source never switches palm↔aim mid-hold. `_joint_world_basis`
+  helper (ORIENTATION_VALID gate).
+- `pickup_able_body.gd`: new `_orient_basis(holder)` reads that palm basis (fallback = aim basis
+  only if palm never available). Used BOTH where `_grab_rot_offset` is captured (pick_up, normal
+  + quick_regrab) AND where `target_basis` is applied (_process) — so capture/apply use the SAME
+  source (no snap). Position pivot still = the de-spiked WRIST anchor (`holder_xform.origin`).
+- **Telemetry added (`ORICMP`)**: per-frame angular speed of palm vs wrist vs aim while holding,
+  max-per-window @ ~5 Hz. Confirms whether the palm is actually the calmest source (and gives
+  wrist as a backup if palm isn't perfect).
+
+**HEADSET VERIFY (Alex, look for `v0.9.24-palmrot` on the info panel):**
+1. Re-pinch a STATIONARY plate repeatedly on the same spot — the object must NOT rotate on grab
+   OR release. It should hold its orientation.
+2. Rotate your whole hand while holding — the object SHOULD rotate with your palm (that's wanted).
+3. (Issue 1 regression check) hold through finger-occlusion dropouts — must not let go.
+
+After verify, pull `grab_diag.txt` and read the `ORICMP` lines: expect `palm_max` ≪ `aim_max`
+(palm calm, aim noisy). If palm is also noisy, the data tells us to try wrist or smooth the palm.
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7) — v0.9.23-grabfix: TWO GRAB BUGS FIXED — READ FIRST
+
+Device app **v0.9.23-grabfix** built + installed to AVP (validate clean: "Sandbox built", 0
+script errors; PCK sha `b4ffa14a` parity-matched the installed bundle `gidtuid…`; install
+needed 1 retry — AVP was asleep). **Awaiting Alex's on-headset feel-test of the two fixes.**
+Builds on the uncommitted v0.9.22-responsive WIP. Nothing committed yet — gated on verify.
+
+**The two fixes (both precisely diagnosed from `grab_diag.txt` before this session):**
+1. **False "(grace)" release on a tracking dropout** — `pickup/pickup_handler.gd`
+   `_physics_process`. The release timer (`release_started_msec`) used to accrue while we held
+   through `not _hand_well_observed()` (index+thumb tips untracked). When tracking returned —
+   often with the estimate still splayed (`val≈0`) — the grace window (180 ms) had ALREADY
+   elapsed during the blackout → an instant release fired even though the user kept pinching
+   (telemetry: 36/39 releases were "(grace)"). **Fix:** when `not well_observed`, reset
+   `release_started_msec = 0`; the timer now only accrues while WELL-OBSERVED and open, so a
+   disappearance→return can't carry an elapsed timer. `held_open_ms` guarded to 0 when the
+   timer isn't started (so `fallback` can't false-fire off `now-0`). The wrist anchor carries
+   the object through the dropout; a real release needs a fresh sustained open in clear view.
+2. **~157° rotation snap on quick re-grab** — `pickup/pickup_able_body.gd` `pick_up()`. The
+   quick-regrab restore (same body re-grabbed within `REGRAB_RESTORE_MS=1500`) KEPT the stale
+   `_grab_rot_offset` captured against the holder basis at the ORIGINAL grab; on re-grab the
+   holder basis differs (orientation noise + elapsed time), so the follow target
+   `holder.basis * stale_offset` ≠ current orientation → snap up to ~157° (grab_snap.txt). The
+   "snap on release" report was really the snap at the immediately-following re-grab
+   (release_trace showed ZERO post-release drift; 35/39 grabs were regrab=1). **Fix:** on
+   quick_regrab, RECAPTURE `_grab_rot_offset` fresh vs the CURRENT holder+body basis (frame-0
+   target == current basis → no snap), while still preserving `_grab_point_local` (position
+   anchor) and letting the follow reseed adopt current scale. Quick-regrab now preserves
+   position only, not rotation.
+
+**HEADSET VERIFY (Alex, headset on, look for `v0.9.23-grabfix` on the info panel):**
+1. Grab a plate and hold through repeated index+thumb dropouts (wave the other hand / a plate
+   across the holding hand to occlude the pinch) — it must NOT let go. Deliberate release
+   (sustained open hand in clear view) must still work.
+2. Grab/release a STATIONARY plate repeatedly — NO rotation snap on grab OR on re-grab.
+
+**THEN (gated on Alex's "feels solid"):** FULL POLISH CLEANUP (strip all debug scaffolding —
+grab_diag/GRAB_DIAG, the DEBUG grab-mode button + modes, the trace/release/grab-snap probes,
+dead `_glitch_gate`/`_has_confident_hand_release_signal`/`_is_controller_profile_input`/
+`_wrist_world`, private-KB-link + version/session comments; keep the educational gotcha
+comments) → ship to TestFlight with the pending batch per `~/knowledge/projects/godot-avp-cascade.md`.
+Then update KB `intelligence/techniques/godot-avp-grab-by-point.md` + commit/push KB.
+
+**DEEPER root cause (optional, after the two fixes):** Godot's raw hand-ORIENTATION stream is
+very noisy on this engine path (~54 rad/s while held steady; `clampA` fired ~90% of held
+frames) while Apple's Persona tracking is smooth → it's the Godot/OpenXR hand-data path. The
+RESPONSIVE vs DAMPED modes feel identical because discrete snaps + orientation noise dominate.
+Candidate: drive grab ROTATION from the WRIST JOINT (like the position anchor) instead of the
+controller "aim" basis — but FIRST add telemetry comparing wrist-joint vs controller-basis
+per-frame angular speed, then decide.
+
+---
+
 ## ⚠️ STATE (2026-05-31, session 6) — v0.8.0-controls: 4 ITEMS SHIPPED — READ FIRST
 
 Device app **v0.8.0-controls** built (validate gate clean: 0 errors / 1 "Sandbox built";

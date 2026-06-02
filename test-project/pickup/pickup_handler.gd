@@ -456,6 +456,115 @@ func _origin_xform() -> Transform3D:
 	return Transform3D.IDENTITY
 
 
+# --- Held-body ROTATION source (fix: "object keeps rotating on every pinch"). The held body used
+# to rotate with THIS handler's basis = the CONTROLLER (aim) pose, which is derived from the pinch
+# and swings violently as the fingers close/open (telemetry: ~20 rad/s MEDIAN, clampA on 55% of
+# held frames) → the object's orientation walked every grab/release. The PALM joint is a stable
+# bone at the centre of the hand; its orientation doesn't move when you pinch. We drive the grab
+# rotation from it. Rendered through the XROrigin (like the position anchor) so a world-handle drag
+# can't twist held objects. ---
+
+# World-space orientation basis of a hand joint, or null if the joint's orientation isn't VALID.
+func _joint_world_basis(hand_tracker: XRHandTracker, joint: int):
+	if hand_tracker == null or not hand_tracker.get_has_tracking_data():
+		return null
+	var flags := int(hand_tracker.get_hand_joint_flags(joint))
+	if (flags & XRHandTracker.HAND_JOINT_FLAG_ORIENTATION_VALID) == 0:
+		return null
+	var jb := hand_tracker.get_hand_joint_transform(joint).basis.orthonormalized()
+	return (_origin_xform().basis.orthonormalized() * jb).orthonormalized()
+
+# Read by the held body each frame (PickupAbleBody3D._orient_basis) as its rotation source. Returns
+# the requested hand JOINT's world orientation basis (WRIST or PALM, per grab_mode), holding the last
+# good value PER JOINT through a one-frame flicker so the source never drops to null mid-hold (which
+# would snap). null only if that joint's orientation has NEVER been valid (e.g. controller) → aim.
+var _last_ori_basis : Dictionary = {}   # joint:int -> Basis (last good)
+func joint_orientation_basis(joint: int):
+	var b = _joint_world_basis(_get_hand_tracker(), joint)
+	if b != null:
+		_last_ori_basis[joint] = b
+		return b
+	return _last_ori_basis.get(joint, null)
+
+# De-spiked THUMB-TIP world transform — the THUMB grab mode's anchor (object rigid to the thumb tip
+# for both position and rotation, so index movement during a pinch/pull doesn't disturb it). The raw
+# thumb-tip POSITION glitches at the grab instant (telemetry: 3/21 grabs spiked 0.35-0.40 m, baking a
+# wrong grab point → a ~15-20 cm object jump), so we median-of-3 de-spike the position (same trick as
+# the fingertip anchor), sampled every render frame, and hold the last good value through a dropout.
+# Orientation passes through (the body's one-euro slerp + angular clamp smooth it). null until the
+# thumb tip has been tracked at least once.
+var _thumb_pos_hist : Array[Vector3] = []
+var _thumb_anchor_xf : Variant = null
+func _sample_thumb_anchor() -> void:
+	var ht := _get_hand_tracker()
+	if ht == null or not ht.get_has_tracking_data() or not _joint_has_tracked_position(ht, XRHandTracker.HAND_JOINT_THUMB_TIP):
+		return   # keep the last good anchor (don't null) so a brief dropout holds rather than snaps
+	var raw := _origin_xform() * ht.get_hand_joint_transform(XRHandTracker.HAND_JOINT_THUMB_TIP)
+	_thumb_pos_hist.push_back(raw.origin)
+	if _thumb_pos_hist.size() > 3:
+		_thumb_pos_hist.pop_front()
+	var pos := raw.origin
+	if _thumb_pos_hist.size() == 3:
+		pos = Vector3(
+			_median3(_thumb_pos_hist[0].x, _thumb_pos_hist[1].x, _thumb_pos_hist[2].x),
+			_median3(_thumb_pos_hist[0].y, _thumb_pos_hist[1].y, _thumb_pos_hist[2].y),
+			_median3(_thumb_pos_hist[0].z, _thumb_pos_hist[1].z, _thumb_pos_hist[2].z))
+	_thumb_anchor_xf = Transform3D(raw.basis, pos)
+
+# Read by the held body (PickupAbleBody3D._thumb_xform) in THUMB mode for both pivot and rotation.
+func thumb_anchor_xform():
+	return _thumb_anchor_xf
+
+# --- Orientation-source comparison telemetry (strip with GRAB_DIAG). Logs per-frame angular speed
+# (rad/s, max-per-window so it survives the ~5 Hz throttle) of PALM vs WRIST vs the old AIM basis
+# while holding, to confirm the palm is the calmest rotation source. ---
+var _ori_prev_palm : Basis = Basis.IDENTITY
+var _ori_prev_wrist : Basis = Basis.IDENTITY
+var _ori_prev_aim : Basis = Basis.IDENTITY
+var _ori_have_palm := false
+var _ori_have_wrist := false
+var _ori_have_aim := false
+var _ori_palm_max := 0.0
+var _ori_wrist_max := 0.0
+var _ori_aim_max := 0.0
+var _ori_log_last_ms := 0
+
+func _ang_speed_basis(a: Basis, b: Basis, dt: float) -> float:
+	if dt <= 0.0:
+		return 0.0
+	return a.get_rotation_quaternion().angle_to(b.get_rotation_quaternion()) / dt
+
+func _sample_orient_compare(delta: float) -> void:
+	var ht := _get_hand_tracker()
+	var palm = _joint_world_basis(ht, XRHandTracker.HAND_JOINT_PALM)
+	var wrist = _joint_world_basis(ht, XRHandTracker.HAND_JOINT_WRIST)
+	var aim := global_transform.basis.orthonormalized()
+	if palm != null:
+		var pb : Basis = palm
+		if _ori_have_palm:
+			_ori_palm_max = maxf(_ori_palm_max, _ang_speed_basis(_ori_prev_palm, pb, delta))
+		_ori_prev_palm = pb
+		_ori_have_palm = true
+	if wrist != null:
+		var wb : Basis = wrist
+		if _ori_have_wrist:
+			_ori_wrist_max = maxf(_ori_wrist_max, _ang_speed_basis(_ori_prev_wrist, wb, delta))
+		_ori_prev_wrist = wb
+		_ori_have_wrist = true
+	if _ori_have_aim:
+		_ori_aim_max = maxf(_ori_aim_max, _ang_speed_basis(_ori_prev_aim, aim, delta))
+	_ori_prev_aim = aim
+	_ori_have_aim = true
+	var now := Time.get_ticks_msec()
+	if now - _ori_log_last_ms >= 200:
+		_gdiag("ORICMP %s palm_max=%.1f wrist_max=%.1f aim_max=%.1f palm_ok=%d" % [
+			_side(), _ori_palm_max, _ori_wrist_max, _ori_aim_max, int(palm != null)])
+		_ori_palm_max = 0.0
+		_ori_wrist_max = 0.0
+		_ori_aim_max = 0.0
+		_ori_log_last_ms = now
+
+
 # Update our detection range.
 func _update_detect_range() -> void:
 	var shape : SphereShape3D = $CollisionShape3D.shape
@@ -535,8 +644,13 @@ func _ready() -> void:
 # Running the re-pin here in _process flattens it: the correction now lands on every
 # rendered frame instead of fighting the display cadence. Pickup/release latch +
 # closest-body detection stay in _physics_process (logic, not visual smoothness).
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_anchor_from_hand_tracker()
+	_sample_thumb_anchor()   # keep the de-spiked thumb-tip anchor warm (THUMB grab mode reads it)
+	# Compare candidate rotation sources (palm/wrist/aim) while holding — telemetry for the
+	# "object keeps rotating on every pinch" fix. Strip with GRAB_DIAG.
+	if GRAB_DIAG and picked_up_body != null:
+		_sample_orient_compare(delta)
 
 
 # Called every physics frame
@@ -583,7 +697,15 @@ func _physics_process(delta) -> void:
 	if picked_up_body:
 		if pickup_pressed:
 			release_started_msec = 0
+			picked_up_body.follow_suspended = false
 		else:
+			# Freeze-on-open: the instant the pinch opens, stop a freeze-on-release body (plate/wall)
+			# from following the hand out — otherwise the opening thumb drags the placed object ("it
+			# stays resting on my thumb"). The latch below still HOLDS the grab through the grace
+			# window (no false drop); the body just holds its pose, so a real release leaves it where
+			# you opened and a re-pinch resumes from there. Throwable bodies ignore this (they need
+			# the release motion for throw velocity). See PickupAbleBody3D._process.
+			picked_up_body.follow_suspended = true
 			# STICKY RELEASE: never drop the grab on degraded/lost tracking. Release only on a
 			# CONFIDENT open — fingers clearly open, SUSTAINED, AND the hand currently well-observed
 			# (pinch joints tracked, low recent jitter, no glitch in progress). If the hand is poorly
@@ -594,9 +716,19 @@ func _physics_process(delta) -> void:
 			# accumulates toward a release.
 			var well_observed := (not hold_while_hand_tracking_uncertain) or _hand_well_observed()
 			var now_msec := Time.get_ticks_msec()
-			if release_started_msec == 0:
+			# Only accrue the release timer while the hand is WELL-OBSERVED and open. If tracking is
+			# degraded (pinch joints untracked / hand jumping out of view), RESET it so a multi-frame
+			# disappearance can't carry an elapsed timer. That was the false-release bug: the
+			# index+thumb tips vanished for a few frames while the user kept pinching, the timer
+			# accrued past release_grace_msec during the blackout, and the instant tracking returned
+			# (often with the estimate still splayed, val≈0) an immediate "(grace)" release fired.
+			# Now a real release needs a FRESH sustained open in clear view; the wrist anchor carries
+			# the object through the dropout.
+			if not well_observed:
+				release_started_msec = 0
+			elif release_started_msec == 0:
 				release_started_msec = now_msec
-			var held_open_ms := now_msec - release_started_msec
+			var held_open_ms := (now_msec - release_started_msec) if release_started_msec != 0 else 0
 			var quick := pickup_value <= quick_release_value and held_open_ms >= quick_release_debounce_msec
 			var graced := held_open_ms >= release_grace_msec
 			var fallback := held_open_ms >= RELEASE_FALLBACK_MSEC
