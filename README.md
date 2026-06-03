@@ -33,13 +33,16 @@ Hand tracking is an **engine capability, not a project setting** — no amount o
 
 Experimental WIP. Rendering rides on Apple's official visionOS contribution — [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot)'s `apple/visionos-xr` branch (PR open, not yet merged upstream; Ricardo Sanchez-Saez, Apple visionOS team, is lead author — see the [PR thread](https://github.com/godotengine/godot/pull/109975)). **Hand tracking** rides on [Clancey's fork](https://github.com/Clancey/godot/tree/visionos_master_pr), which rebases hand-interaction support on top — see [Which Godot engine you need](#️-which-godot-engine-you-need-read-this-first) above.
 
-Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26. **Live on [TestFlight](https://testflight.apple.com/join/bw1aeExJ)** (build 5, v0.9.0).
+Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26; hand-grab refined through **2026-06-02**. **Live on [TestFlight](https://testflight.apple.com/join/bw1aeExJ)** (build 7, panel `v0.9.34`).
 
 - 90 FPS locked, **zero variance across a 95-second sample** (19 × 5-second windows)
 - ~475 physics collisions / 95s
 - Mobile renderer + Metal driver (Forward+ silently doesn't render on this path)
 - Mixed immersion (passthrough) — cubes composite into your real room
-- **Pinch-to-grab and throw** any cube with either hand
+- **Pinch-to-grab and throw** any cube with either hand — grab-by-point, anchored to the de-spiked thumb tip
+- **Two-hand pinch to scale + rotate** any object, or the whole world via the floating chrome handle
+- One grabbable **control panel** (HANDS / START / MUTE / GESTURES / SKY / RESET) + a 30 s time-attack with a procedural soundtrack and a global leaderboard
+- System wrist/Home menu hidden for uninterrupted immersion via the `GodotPersistentSystemOverlays` Info.plist key (build 7)
 
 ## What Cascade Countdown proves
 
@@ -50,7 +53,7 @@ Cascade Countdown is the first published example of:
 - `RigidBody3D` simulation running in immersive mode on AVP via the Apple-official native path
 - `AudioStreamGenerator` + `push_frame` real-time procedural audio synchronized to physics collisions
 - A fully procedural scene (no `.glb`, no `.scn`, no textures) that walks the full XR pipeline
-- **Hand-tracking pickup via `XRHandTracker` joint data and `XRController3D`** — pinch distance drives a smooth analog threshold; cubes snap to the pinch midpoint and inherit hand velocity on throw
+- **Hand-tracking pickup via `XRHandTracker` joint data and `XRController3D`** — thumb–index pinch distance drives a smooth analog threshold; you grab an object *by the exact point you pinched* (it rotates about that point, anchored to the de-spiked thumb tip and eased by a one-euro filter), and it inherits your hand velocity on throw
 
 ## How it's built
 
@@ -62,7 +65,7 @@ test-project/
     pickup_handler.gd # PickupHandler3D — pinch detection, fingertip anchoring (Marshall Nowak)
     pickup_able_body.gd # PickupAbleBody3D — grab/snap/throw logic with velocity tracking
   shaders/
-    highlight_shader.tres    # Yellow outline on nearest grabbable cube
+    highlight_shader.tres    # inverted-hull outline: cyan = nearest grabbable, green = held, blue = two-hand scale
     highlight_material.tres
   project.godot       # mobile renderer, OpenXR + hand_interaction_profile, alpha-0 clear
   export_presets.cfg  # visionOS preset, app_role=Immersive

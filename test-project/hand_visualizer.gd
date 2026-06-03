@@ -1,8 +1,11 @@
 class_name HandVisualizer3D
 extends Node3D
 
-# Renders a glowing sphere at each XRHandTracker joint position.
-# Parent must be XROrigin3D — joint transforms are in XROrigin3D's local frame.
+# OPTIONAL DEBUG TOOL — not wired into the shipped scene. Renders a small glowing sphere at every
+# XRHandTracker joint so you can see the raw tracked skeleton (handy when debugging hand-tracking
+# alignment, or the VALID vs TRACKED joint flags). To use it: add a HandVisualizer3D as a child of
+# XROrigin3D and set tracker_name to "/user/hand_tracker/left" or "/user/hand_tracker/right" (joint
+# transforms are in XROrigin3D's local frame). The game itself uses HandMeshDriver3D (the GLTF mesh).
 @export var tracker_name: String
 
 var _joints: Array[MeshInstance3D] = []

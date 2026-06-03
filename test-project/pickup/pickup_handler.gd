@@ -162,9 +162,9 @@ func _joint_has_tracked_position(hand_tracker: XRHandTracker, joint: int) -> boo
 
 
 # Re-pin the handler origin to the (de-spiked) thumb-index midpoint each render frame. This is the
-# proximity/reach anchor and the pivot for the ORIGINAL grab mode; WRIST/THUMB modes override the
-# pivot with the thumb-tip anchor (thumb_anchor_xform). Render rate, NOT physics: the held body rides
-# this pose, and re-pinning at 60 Hz under a 90 Hz display injected a 3:2-beat saw-tooth.
+# proximity/reach anchor used for detection, and the FALLBACK grab pivot — the held body normally
+# rides the de-spiked thumb-tip anchor (thumb_anchor_xform) instead. Render rate, NOT physics: the
+# held body rides this pose, and re-pinning at 60 Hz under a 90 Hz display injected a 3:2-beat saw-tooth.
 func _update_anchor_from_hand_tracker() -> void:
 	if not follow_fingertips:
 		return
@@ -216,10 +216,12 @@ func _origin_xform() -> Transform3D:
 		n = n.get_parent()
 	return Transform3D.IDENTITY
 
-# De-spiked THUMB-TIP world transform — the position anchor (pivot) for WRIST and THUMB modes and the
-# rotation source for THUMB. The raw thumb-tip POSITION glitches at the grab instant (telemetry: ~14%
-# of grabs spiked 0.35-0.40 m, baking a wrong grab point → a ~15-20 cm jump), so we median-of-3
-# de-spike the position, sampled every render frame, and hold the last good value through a dropout.
+# De-spiked THUMB-TIP world transform — the grab pivot AND the rotation source the held body uses.
+# The thumb is the stable side of a pinch (the index moves as you pinch/pull/release; the thumb
+# barely does), so anchoring both position and rotation to it is far calmer than the controller
+# "aim" pose. The raw thumb-tip POSITION still glitches at the grab instant (telemetry: ~14% of
+# grabs spiked 0.35-0.40 m, baking a wrong grab point → a ~15-20 cm jump), so we median-of-3 de-spike
+# the position, sampled every render frame, and hold the last good value through a dropout.
 var _thumb_pos_hist : Array[Vector3] = []
 var _thumb_anchor_xf : Variant = null
 func _sample_thumb_anchor() -> void:
@@ -295,7 +297,7 @@ func _ready() -> void:
 # detection stay in _physics_process (logic, not visual smoothness).
 func _process(_delta: float) -> void:
 	_update_anchor_from_hand_tracker()
-	_sample_thumb_anchor()   # keep the de-spiked thumb-tip anchor warm (WRIST/THUMB modes read it)
+	_sample_thumb_anchor()   # keep the de-spiked thumb-tip anchor warm (the held body reads it)
 
 
 func _physics_process(_delta) -> void:

@@ -1,14 +1,17 @@
 extends Node3D
 
-# Physics Sandbox — arrange a course in mixed-immersion and route falling cubes
-# from a grabbable spawn emitter, through grabbable obstacles, into a grabbable
-# goal portal that scores them. All geometry built procedurally in _ready().
-# Hand tracking pickup/throw courtesy of Marshall Nowak (Nocxr).
+# Cascade Countdown — a hand-tracked physics arcade for Apple Vision Pro. Route falling cubes
+# from a grabbable spawn emitter, through grabbable obstacles, into a grabbable goal portal
+# that scores them. ALL geometry is built procedurally in _ready() (the .tscn holds only the XR
+# rig), so the whole game reads top-to-bottom in this one script. Section banners below divide it.
+# Hand-tracking pickup/throw courtesy of Marshall Nowak (Nocxr) — see pickup/.
 #
-# Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
+# Pinch gestures (each also a poke button on the control panel):
+#   index→thumb  = grab / throw           middle→thumb = cycle hands (mesh / both / real arms)
+#   ring→thumb   = reset everything       pinky→thumb  = toggle sky (immersion / passthrough)
 
-# Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.9.34-nowrist"  # SHIP build: collapsed grab to THUMB-only (thumb-tip anchor for both pivot + rotation, grab-by-point, one-euro, clean-release on open). Removed the WRIST/ORIGINAL A/B modes + the in-world DEBUG button + grab telemetry. Two-hand scale uses thumb+index POSITION_VALID (occlusion-robust). Hides visionOS persistent system overlays (wrist/Home menu) via GodotPersistentSystemOverlays=hidden Info.plist key — engine already reads it, no rebuild
+# Shown on the in-world info panel; bump on meaningful releases. (Full changelog lives in git log.)
+const APP_VERSION := "v0.9.34-nowrist"
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -111,8 +114,8 @@ var _gesture_panel: Node3D
 var _gestures_toggle_label: Label3D
 var _gestures_toggle_mat: StandardMaterial3D
 var _best_panel_label: Label3D   # bigger "BEST" readout on the gesture panel
-# Grab-stutter diagnostics: count physics vs render frames to confirm the 90 Hz
-# display / 60 Hz physics beat, and log held/pause/double-grab state per window.
+# FPS / grab diagnostics: count physics vs render frames to confirm the 90 Hz display /
+# 60 Hz physics beat, and log held / double-grab state per 5 s window (see _grab_diag).
 var _phys_frame_count := 0
 var _last_proc_log := 0
 var _last_phys_log := 0
@@ -125,12 +128,8 @@ var _grabbables: Array = []            # everything reset() returns home
 var _home_transforms: Dictionary = {}  # instance_id → Transform3D
 var _hand_handlers: Dictionary = {}    # side → PickupHandler3D
 
-# Two-hand scaling state.
-var _scaling_body: Node3D = null
-var _scale_start_dist := 0.0
-var _scale_start_scale := Vector3.ONE
-var _scale_pivot := Vector3.ZERO  # held object's position frozen at engage
-# Two-anchor (glued-pinch) two-hand transform state.
+# Two-hand scaling state (glued-pinch: both index pinches lock to world points, so scale +
+# rotation + translation all fall out of how the two anchors move; see _update_two_hand_scale).
 var _scale_active := false
 var _scale_is_world := false
 var _scale_target: Node3D = null
@@ -160,10 +159,6 @@ var _index_pinch_state := {"left_hand": false, "right_hand": false}
 const PINCH_START := 0.024   # must close to here to BEGIN an index pinch (firm pinch)
 const PINCH_END := 0.052     # must open past here to END it (hysteresis gap)
 
-# Retained only for the _grab_diag readout (always false now): the world handle
-# moves the XROrigin, so no physics ever needs to be frozen.
-var _sim_paused := false
-
 # Scene handle: grab the chrome handlebar to move/scale the whole course.
 # Manual grab (the handle is a plain Node3D, NOT a pickup body) so the
 # PickupHandler can never auto-grab it by proximity near the face.
@@ -174,9 +169,6 @@ var _handle_held_side := ""        # "", "left_hand", or "right_hand"
 var _handle_prev_pinch = null      # Vector3 or null; holder hand's last pinch pos
 var _handle_filt_delta := Vector3.ZERO   # smoothed world-drag delta (a little dampening)
 const HANDLE_DAMP_ALPHA := 0.45    # 0..1 — lower = more dampening on the world-handle drag
-var _world_scale_start_dist := 0.0
-var _world_scale_start_scale := Vector3.ONE
-var _world_scale_pivot := Vector3.ZERO  # captured ONCE at scale engage (stable)
 var _world_home: Transform3D = Transform3D.IDENTITY
 var _origin_home: Transform3D = Transform3D.IDENTITY  # XROrigin3D rest pose; the world handle moves the origin, reset restores it
 
@@ -255,13 +247,10 @@ var _destruct_cooldown := 0.0
 # stay easy to pick up (visual mesh unchanged).
 const MIN_GRAB_SIDE := 0.10
 
+# ============================================================================
+# LIFECYCLE & XR INIT
+# ============================================================================
 func _ready():
-	# Fresh grab telemetry each launch (truncate). See _gdiag / GRAB_DIAG.
-	if GRAB_DIAG:
-		var gf := FileAccess.open("user://grab_diag.txt", FileAccess.WRITE)
-		if gf != null:
-			gf.store_line("# grab_diag — %s — GRABBED/LETGO/HOLD(slip_mm)/ANCHORSRC/GRAB_BLOCKED/SCALE_*" % APP_VERSION)
-			gf.close()
 	var interface = XRServer.find_interface("visionOS")
 	if interface and interface.initialize():
 		print("[Sandbox] visionOS XR initialized OK")
@@ -313,6 +302,9 @@ func _ready():
 		_sky_mat.set_shader_parameter("dissolve", 1.0)  # fully resolved = occludes
 	_write_log("Sandbox built; audio ready; hand tracking active")
 
+# ============================================================================
+# SCENE CONSTRUCTION — all geometry built procedurally here (no .tscn content)
+# ============================================================================
 func _build_resources():
 	_physics_material = PhysicsMaterial.new()
 	_physics_material.bounce = 0.38
@@ -628,6 +620,9 @@ void fragment() {
 	killer.body_entered.connect(_on_kill_entered)
 	add_child(killer)
 
+# ============================================================================
+# SETUP — audio, hand tracking, info panel
+# ============================================================================
 func _setup_audio():
 	_shared_audio = AudioStreamPlayer3D.new()
 	var gen := AudioStreamGenerator.new()
@@ -804,6 +799,9 @@ func _update_info_panel(delta: float) -> void:
 	_info_panel_t += delta
 	_info_accent_mat.emission_energy_multiplier = 1.0 + 0.5 * (0.5 + 0.5 * sin(_info_panel_t * 2.0))
 
+# ============================================================================
+# MAIN LOOP
+# ============================================================================
 func _physics_process(delta: float) -> void:
 	_phys_frame_count += 1
 	# Spin the bar bumpers in the physics step (solver-aligned kinematic move → cubes are
@@ -873,6 +871,9 @@ func _process(delta: float):
 		_flash_energy = move_toward(_flash_energy, 0.0, delta * 22.0)
 		_flash_light.light_energy = _flash_energy
 
+# ============================================================================
+# CUBES — spawn · collision · scoring · goal
+# ============================================================================
 func _spawn_cube():
 	var size: float = randf_range(0.06, 0.12)
 	var color: Color = CUBE_PALETTE[randi() % CUBE_PALETTE.size()]
@@ -1107,6 +1108,9 @@ func _on_portal_entered(cube: Node3D, at: Vector3):
 	_spawn_burst(at, Color(0.40, 0.90, 1.0))
 	_push_score_fanfare()
 
+# ============================================================================
+# VISUAL FX — fireworks, shockwaves, gradients
+# ============================================================================
 # Celebratory fireworks at the portal: a big multicolor burst, a layer of fast
 # bright sparks, and an expanding shockwave ring flash.
 func _spawn_burst(pos: Vector3, color: Color):
@@ -1216,6 +1220,9 @@ func _chain_color(chain: int) -> Color:
 		return Color(1.0, 0.95, 0.25) # yellow
 	return Color(1.0, 1.0, 1.0)       # white
 
+# ============================================================================
+# RESET — return everything home
+# ============================================================================
 func _reset_sandbox():
 	# Restore the world transform (legacy; the handle no longer moves it) and the
 	# XROrigin — the world handle now drags the user, so reset must re-center them.
@@ -1224,7 +1231,6 @@ func _reset_sandbox():
 	if has_node("XROrigin3D"):
 		$XROrigin3D.transform = _origin_home
 	_handle_prev_pinch = null
-	_world_scale_start_dist = 0.0
 	# Despawn all cubes.
 	for c in _active_cubes:
 		if is_instance_valid(c):
@@ -1251,6 +1257,9 @@ func _reset_sandbox():
 	# Confirmation chime.
 	_push_chime(660.0, 0.10, true)
 
+# ============================================================================
+# PROCEDURAL AUDIO — real-time synthesis (AudioStreamGenerator push_frame)
+# ============================================================================
 func _push_chime(freq: float, duration: float, harmonic: bool):
 	if _audio_playback == null:
 		return
@@ -1422,15 +1431,13 @@ func _bed_sample(t: float, urg: float) -> float:
 	out *= 0.9 + 0.4 * urg
 	return clampf(out, -1.0, 1.0)
 
-# Returns which finger tip (15=middle, 20=ring, 25=pinky) is pinching the thumb,
-# or -1 if none. "Closest wins": only the single finger nearest the thumb counts,
-# so adjacent fingers (ring vs pinky) can't cross-trigger. Index must be extended
-# so a normal grab never fires a gesture. Raw int indices avoid the LITTLE/PINKY
-# enum-name divergence between the 4.6.3 editor and 4.6.2.rc runtime.
-# Confidence gate: a hand counts as confidently tracked only when its tracker
-# has data AND the wrist plus all five fingertips are POSITION_TRACKED. If a hand
-# isn't confident we assume NO gesture/pinch is happening (per request — never
-# guess from a half-visible hand). Used by every gesture and pinch-point reader.
+# ============================================================================
+# HAND TRACKING — gesture & pinch readers
+# ============================================================================
+# Confidence gate: a hand counts as confidently tracked only when its tracker has data AND the
+# wrist plus all five fingertips are POSITION_TRACKED. If a hand isn't confident we assume NO
+# gesture/pinch is happening (per request — never guess from a half-visible hand). Used by the
+# gesture readers below.
 func _hand_confident(side: String) -> bool:
 	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
 	var tracker := XRServer.get_tracker(tname)
@@ -1446,6 +1453,10 @@ func _hand_confident(side: String) -> bool:
 			return false
 	return true
 
+# Returns which finger tip (15=middle, 20=ring, 25=pinky) is pinching the thumb, or -1 if none.
+# "Closest wins": only the single finger nearest the thumb counts, so adjacent fingers (ring vs
+# pinky) can't cross-trigger. Index must be extended so a normal grab never fires a gesture. Raw
+# int indices avoid the LITTLE/PINKY enum-name divergence (4.6.3 editor vs 4.6.2.rc runtime).
 func _which_finger_pinch(side: String) -> int:
 	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
 	var tracker := XRServer.get_tracker(tname)
@@ -1516,6 +1527,9 @@ func _index_pinch_point(side: String):
 		return null
 	return (index + thumb) * 0.5
 
+# ============================================================================
+# IMMERSION — sky (opaque) ↔ passthrough (mixed) toggle
+# ============================================================================
 # Toggle a giant inward-facing skybox sphere that fully blocks the real world.
 # We stay in mixed immersion (CompositorServices style is launch-bound); the
 # skybox is just opaque geometry surrounding the user. background_mode stays
@@ -1686,17 +1700,6 @@ func _index_tip_world(side: String):
 		return null
 	var origin := $XROrigin3D as Node3D
 	return origin.global_transform * ht.get_hand_joint_transform(idx).origin
-
-# Wrist joint (index 1) of a hand in WORLD space — for the "poke your wrist" toggle.
-func _wrist_world(side: String):
-	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
-	var ht := XRServer.get_tracker(tname) as XRHandTracker
-	if ht == null or not ht.get_has_tracking_data():
-		return null
-	if not (int(ht.get_hand_joint_flags(1)) & 8):  # WRIST, POSITION_TRACKED
-		return null
-	var origin := $XROrigin3D as Node3D
-	return origin.global_transform * ht.get_hand_joint_transform(1).origin
 
 # Cached soft radial gradient (white core → transparent edge) for cube bloom halos.
 func _get_glow_tex() -> GradientTexture2D:
@@ -2200,6 +2203,9 @@ func _depress(face: Node3D) -> void:
 	tw.tween_property(face, "position:z", -0.014, 0.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tw.tween_property(face, "position:z", 0.0, 0.11).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
+# ============================================================================
+# LEADERBOARD — global high scores (Google Apps Script) + local best
+# ============================================================================
 # Fire-and-forget GET submit (survives Apps Script's POST→GET redirect).
 func _submit_score(score: int) -> void:
 	if _http == null or LEADERBOARD_URL == "":
@@ -2322,6 +2328,9 @@ func _save_best() -> void:
 		f.close()
 
 
+# ============================================================================
+# INSTRUCTIONS PANEL — the cold-open "HOW TO PLAY" board
+# ============================================================================
 # Floating cold-open explainer: goal of the game + control map, with small 3D
 # icon "diagrams". Grabbable/movable like the other panels (and self-destructible).
 func _build_instructions_panel() -> void:
@@ -2460,6 +2469,9 @@ func _build_instructions_panel() -> void:
 	_register_grabbable(root)
 	_attach_destruct_button(root, Vector3(0.0, -size_y * 0.5 - 0.018, 0.0))
 
+# ============================================================================
+# SELF-DESTRUCT BUTTONS — poke a panel's red button to shatter it (reset restores)
+# ============================================================================
 # Attach a small red self-destruct button beneath a panel (child, so it rides the
 # panel when moved). Poke it to dissolve the panel; reset brings it back.
 func _attach_destruct_button(panel: Node3D, local_pos: Vector3) -> void:
@@ -2531,6 +2543,9 @@ func _dissolve_panel(panel: Node3D) -> void:
 		(panel as CollisionObject3D).collision_layer = 0
 	_push_invader_explosion()
 
+# ============================================================================
+# WORLD MANIPULATION — scene handle (one-hand drag) + two-hand scale / rotate
+# ============================================================================
 # Scene handle: grab the chrome bar to drag the whole world. Standard VR world-grab —
 # instead of translating the course (which dragged every physics body through the
 # solver and caused jitter), we move the XROrigin3D (the user) the OPPOSITE way. The
@@ -2606,7 +2621,6 @@ func _update_scene_handle() -> void:
 func _release_handle() -> void:
 	_handle_held_side = ""
 	_handle_prev_pinch = null
-	_world_scale_start_dist = 0.0
 	if _scene_handle != null:
 		_scene_handle.set_held(false)
 
@@ -2665,9 +2679,6 @@ func _update_two_hand_scale() -> void:
 		_scale_is_world = is_world
 		_scale_A0 = PA
 		_scale_B0 = PB
-		_gdiag("SCALE_ENGAGE world=%s target=%s L=%s R=%s" % [
-			str(is_world), ("none" if obj == null else "%s#%d" % [obj.name, obj.get_instance_id()]),
-			_hand_holds("left_hand"), _hand_holds("right_hand")])
 		if is_world:
 			_scale_WA = PA   # world points under the pinches, frozen at engage
 			_scale_WB = PB
@@ -2726,10 +2737,6 @@ func _update_two_hand_scale() -> void:
 
 func _end_scale() -> void:
 	if _scale_active:
-		_gdiag("SCALE_END world=%s target=%s L=%s R=%s" % [
-			str(_scale_is_world),
-			("none" if _scale_target == null or not is_instance_valid(_scale_target) else "%s#%d" % [_scale_target.name, _scale_target.get_instance_id()]),
-			_hand_holds("left_hand"), _hand_holds("right_hand")])
 		if _scale_target != null and is_instance_valid(_scale_target) and _scale_target.has_method("set_two_hand"):
 			_scale_target.set_two_hand(false)
 			# Fully RELEASE the scaled object so it's placed in space and can be re-grabbed by
@@ -2748,7 +2755,6 @@ func _end_scale() -> void:
 	_scale_active = false
 	_scale_is_world = false
 	_scale_target = null
-	_scaling_body = null
 	_scale_lost_frames = 0
 
 # Approx world-space grab radius of an object (half AABB diagonal × scale + grace),
@@ -2762,6 +2768,9 @@ func _obj_reach(n: Node3D) -> float:
 			break
 	return r + 0.10
 
+# ============================================================================
+# GRAB SOUND + pinch helper
+# ============================================================================
 # Play a soft grounding "thunk" the frame a hand newly grabs a body.
 func _update_grab_sound() -> void:
 	for side in ["left_hand", "right_hand"]:
@@ -2784,39 +2793,20 @@ func _push_grab() -> void:
 		var s := (sin(TAU * f * t) * 0.5 + sin(TAU * f * 0.5 * t) * 0.2) * exp(-13.0 * u)
 		_audio_playback.push_frame(Vector2(s, s))
 
-# Midpoint of index+thumb tips for a hand, or null if not pinching/tracked.
-# Requires full-hand confidence so scaling never engages off a half-seen hand.
-func _pinch_point(side: String):
-	if not _hand_confident(side):
-		return null
-	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
-	var tracker := XRServer.get_tracker(tname)
-	if not tracker is XRHandTracker:
-		return null
-	var ht := tracker as XRHandTracker
-	if not ht.get_has_tracking_data():
-		return null
-	var idx := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
-	var thumb := XRHandTracker.HAND_JOINT_THUMB_TIP
-	var tracked := XRHandTracker.HAND_JOINT_FLAG_POSITION_TRACKED
-	if not ((int(ht.get_hand_joint_flags(idx)) & tracked) and (int(ht.get_hand_joint_flags(thumb)) & tracked)):
-		return null
-	var ip := ht.get_hand_joint_transform(idx).origin
-	var tp := ht.get_hand_joint_transform(thumb).origin
-	if ip.distance_to(tp) > 0.04:  # not pinching
-		return null
-	return (ip + tp) * 0.5
-
 func _on_kill_entered(body: Node3D):
 	# Falling cubes despawn silently — score 0.
 	if body.is_in_group("cube"):
 		_active_cubes.erase(body)
 		body.queue_free()
 
-# Per-window grab diagnostics. proc≈450 & phys≈300 per 5s confirms the 90/60
-# render-vs-physics beat (held body follows in PickupHandler._physics_process).
-# follow_off = distance from the holding handler to its parent controller origin
-# (how far the 90 Hz controller drags the body between 60 Hz re-pins).
+# ============================================================================
+# DIAGNOSTICS — written to user://xr_diag.txt (pull with devicectl after a run)
+# ============================================================================
+# The one diagnostic kept for the shipped sample (grab telemetry was removed). _grab_diag()
+# builds a status line appended every 5 s by _process: proc≈450 & phys≈300 per 5 s confirms the
+# 90/60 render-vs-physics beat (the held body follows in PickupHandler._physics_process).
+# follow_off = distance from the holding handler to its parent controller origin (how far the
+# 90 Hz controller drags the body between 60 Hz re-pins).
 func _grab_diag() -> String:
 	var proc_d := _frame_count - _last_proc_log
 	var phys_d := _phys_frame_count - _last_phys_log
@@ -2836,8 +2826,8 @@ func _grab_diag() -> String:
 		var ctrl = hh.get_parent()
 		if ctrl is Node3D:
 			follow_off = hh.global_position.distance_to((ctrl as Node3D).global_position)
-	return "proc=%d phys=%d held=%s both_same=%s paused=%s follow_off=%.3f active=%d collisions=%d" % [
-		proc_d, phys_d, held_side, str(both_same), str(_sim_paused), follow_off, _active_cubes.size(), _collision_count]
+	return "proc=%d phys=%d held=%s both_same=%s follow_off=%.3f active=%d collisions=%d" % [
+		proc_d, phys_d, held_side, str(both_same), follow_off, _active_cubes.size(), _collision_count]
 
 func _write_log(msg: String):
 	var f := FileAccess.open("user://xr_diag.txt", FileAccess.WRITE)
@@ -2855,23 +2845,3 @@ func _append_log(msg: String):
 		f.store_string(msg + "\n")
 		f.close()
 		print("[Sandbox] " + msg)
-
-# Append a line to the dedicated grab telemetry file (grab_diag.txt). Pull it with devicectl
-# after a session. Flip GRAB_DIAG off (or delete this + its callers) for release.
-const GRAB_DIAG := false   # grab/scale telemetry off for release; flip true to re-enable grab_diag.txt
-func _gdiag(line: String) -> void:
-	if not GRAB_DIAG:
-		return
-	var f := FileAccess.open("user://grab_diag.txt", FileAccess.READ_WRITE)
-	if f == null:
-		f = FileAccess.open("user://grab_diag.txt", FileAccess.WRITE)
-	if f != null:
-		f.seek_end()
-		f.store_line("%8.2f %s" % [Time.get_ticks_msec() / 1000.0, line])
-		f.close()
-
-func _hand_holds(side: String) -> String:
-	var h = _hand_handlers.get(side)
-	if h != null and h.picked_up_body != null:
-		return "%s#%d" % [h.picked_up_body.name, h.picked_up_body.get_instance_id()]
-	return "none"
