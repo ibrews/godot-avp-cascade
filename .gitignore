@@ -15,6 +15,10 @@ out/xcode-visionos/*.xcodeproj/project.xcworkspace/xcuserdata/
 # Built PCKs (regenerable from test-project/)
 out/xcode-visionos/GodotVisionPilot.pck
 
+# Built engine + camera xcframeworks (~950 MB; contain the BORROWED libgodot.a and its .bak copies).
+# NEVER commit these to this public repo — regenerate from the engine fork. See CLAUDE.md "Do NOT".
+out/xcode-visionos/*.xcframework/
+
 # Templates / large binary bundles
 templates.tpz
 Godot.app/
@@ -26,3 +30,6 @@ captures/frame_*.jpg
 # macOS noise
 .DS_Store
 clancey-godot/
+
+# Local Claude agent/session state (memory, worktrees) — never commit to a public repo
+.claude/

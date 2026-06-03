@@ -2,6 +2,55 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ✅ STATE (2026-06-03) — sample-project polish pass (code/doc cleanup, NO behavior change)
+
+Cleaned the GDScript + README so the repo reads as a clear Godot-on-AVP **sample project**. No
+behavior change — headless-validated ("Sandbox built", 0 script errors), and the engine
+`.a`/`.xcframework`/PCK/xcodeproj were NOT touched, so grab/hand-tracking are byte-for-byte the
+same as shipped build 7.
+
+- **main_v2.gd** (2877 → 2847 lines): removed the dead grab telemetry (`_gdiag` / `GRAB_DIAG` /
+  `grab_diag.txt`, the SCALE_ENGAGE/END calls, the `_ready` header init, `_hand_holds`) — it was
+  gated `false` and the KB already said to strip it at ship. Removed dead state (`_sim_paused`,
+  `_scaling_body`, `_scale_start_*`, `_world_scale_*`) and dead funcs (`_wrist_world`, `_pinch_point`).
+  Added 16 `# ===` section banners; fixed stale comments (header gesture map now lists all four
+  pinches incl. pinky→sky; moved the `_which_finger_pinch` doc off `_hand_confident`). **KEPT** the
+  `xr_diag.txt` FPS diagnostic (`_grab_diag`/`_write_log`/`_append_log`, now clearly labelled) and
+  every teaching gotcha (XROrigin3D.current, alpha-0 bg, FREEZE_MODE_STATIC-while-held, VALID-vs-TRACKED…).
+- **pickup_handler.gd**: fixed 3 comments that still named the removed ORIGINAL/WRIST/THUMB A/B grab
+  modes (collapsed to THUMB-only on 2026-06-02).
+- **hand_visualizer.gd**: it's an unwired orphan (`HandVisualizer3D` is never instantiated) — documented
+  it as an OPTIONAL debug tool instead of deleting. **REVIEW_NEEDED:** delete it if you don't want it kept.
+- **README**: fixed the stale grab description ("snap to pinch midpoint" → grab-by-point / thumb anchor)
+  and "Yellow outline" (→ cyan/green/blue states); Status bumped to build 7 / `v0.9.34`; added the
+  two-hand-scale, control-panel and wrist-menu-hidden features.
+- **chore**: gitignored `.claude/` (local agent memory/worktrees — was untracked in a public repo).
+
+---
+
+## ✅ STATE (2026-06-02, session 7k) — v0.9.34-nowrist SHIPPED to TestFlight (build 7) — READ FIRST
+
+**Wrist/Home menu hidden — and it did NOT need an engine rebuild.** The build-6 "OPEN follow-up"
+below assumed `.persistentSystemOverlays(.hidden)` required a 30-90 min engine rebuild. **WRONG.**
+The Clancey engine lib ALREADY has `.persistentSystemOverlays(Self.preferredPersistentSystemOverlays)`
+on the CompositorLayer content, reading the Info.plist key `GodotPersistentSystemOverlays` (default
+`.automatic`) — an exact sibling of the proven `GodotUpperLimbVisibility` key. Confirmed the reader
+is compiled into the SHIPPING `libgodot.a` via `strings`. So the fix = ONE Info.plist key, NO rebuild,
+`libgodot.a` byte-for-byte unchanged → **zero hand-tracking risk**. (Even a rebuild would've been ~12s
+incremental, not 30-90 min — the `bin/obj/` cache is intact — but it wasn't needed at all.)
+
+**Shipped build 7** (v1.0, panel `v0.9.34-nowrist`): `GodotPersistentSystemOverlays=hidden` in
+GodotVisionPilot-Info.plist, CURRENT_PROJECT_VERSION 6→7, re-exported PCK (`a2f9b51e`, parity-verified
+inside the archived `.app`), ARCHIVE SUCCEEDED → Upload succeeded → EXPORT SUCCEEDED (ASC key
+79HM47GZ7C). Committed `fe121bb` (NOT pushed — manual push per project convention).
+
+**PENDING device verify (Alex):** install build 7 from TestFlight → confirm (a) hand tracking/grab
+still work AND (b) the wrist/Home menu is gone. If grab regressed, it is NOT this change (lib untouched);
+nothing to restore. If `.persistentSystemOverlays(.hidden)` doesn't hide the specific menu Alex means,
+that's an Apple-API scope question, not a build problem.
+
+---
+
 ## ✅ STATE (2026-06-02, session 7j) — v0.9.33-thumbgrab SHIPPED to TestFlight (build 6) — READ FIRST
 
 **Grab + scale interaction set DONE and shipped.** TestFlight **build 6** (v1.0, in-world panel
