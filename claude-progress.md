@@ -2,6 +2,203 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ✅ STATE (2026-06-02, session 7j) — v0.9.33-thumbgrab SHIPPED to TestFlight (build 6) — READ FIRST
+
+**Grab + scale interaction set DONE and shipped.** TestFlight **build 6** (v1.0, in-world panel
+`v0.9.33-thumbgrab`) uploaded successfully (ARCHIVE SUCCEEDED → Upload succeeded → EXPORT SUCCEEDED;
+ASC key 79HM47GZ7C). Processing on Apple's end (~5-15 min to appear). This carries the whole pending
+v0.9.x local batch + the entire grab/scale fix saga.
+
+**Final grab design = THUMB-only** (collapsed from the 3-mode A/B cycle): the handler exposes a
+de-spiked thumb-tip world transform; the body uses it as the single grab source (pivot = thumb
+origin, rotation = thumb basis), grab-by-point + one-euro + clean-release-on-open. Sticky-release
+(timer accrues only while well-observed + open) prevents false drops. Stripped: the WRIST/ORIGINAL
+modes, the in-world DEBUG button, and all grab telemetry (GRAB_DIAG=false; grab_diag.txt/_gdiag).
+Kept the xr_diag.txt FPS diagnostic. Code: ~1394 lines (peak) → ~580 across the two pickup files.
+
+**Full root-cause cascade + the VALID-vs-TRACKED lesson** is written up in KB
+`intelligence/techniques/godot-avp-grab-by-point.md` (Root-cause cascade + resolution section). The
+one-line takeaway: on this hand path, gate interactions on `POSITION_VALID`, reserve `POSITION_TRACKED`
+for confidence checks — the grabbing/pinching hand's own fingers go not-TRACKED under self-occlusion,
+which was behind the false-release, the grab-point slide, and the scale flicker.
+
+**OPEN follow-up (spun off as a chip):** disable the AVP "wrist menu" via
+`.persistentSystemOverlays(.hidden)` — it's in `clancey-godot/platform/visionos/app_visionos.swift`
+(the ENGINE), so it needs a 30-90 min engine rebuild + re-ship. Deliberately NOT in build 6.
+
+**Commit:** the whole batch was committed + pushed to origin/main after the ship (was uncommitted
+since e7b66c2 / the v0.9.27 restore point).
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7i) — v0.9.32-scalevalid: two-hand scale occlusion fix — READ FIRST
+
+Device app **v0.9.32-scalevalid** built + installed (validate clean; PCK `9541fd91` parity-matched
+`gidtuid…`; install try 1). **Grab CONFIRMED good by Alex** ("grab feels better now" on v0.9.31
+anchorfresh). Now fixing two-hand SCALE ("kind of broken, hard to activate"). Restore point on
+origin/main still `e7b66c2`; all consolidation+fixes uncommitted (gated on verify).
+
+**Scale diagnosis (from grab_diag SCALE lines):** rapid SCALE_ENGAGE→SCALE_END pairs (0.2-1.2s) —
+the gesture engaged then tore down every few frames. Root cause (same VALID-vs-TRACKED trap, but in
+main_v2's pinch detector, NOT my rewritten files — pre-existing): `_index_pinch_point` → `_hand_confident`
+required ALL FIVE fingertips + wrist `POSITION_TRACKED`. Two hands pinching close to scale occlude each
+other's fingers → a tip drops to estimated-not-TRACKED → `_index_pinch_point` returns null → scale ends
+(after SCALE_END_GRACE). Engage logic itself is fine (one hand holds via handler.picked_up_body + the
+other pinch within `_obj_reach`).
+
+**Fix:** `_index_pinch_point` now gates on only **thumb(5)+index(10) POSITION_VALID** (estimate ok,
+holds through occlusion) instead of `_hand_confident` (all-5-TRACKED). `_hand_confident` is untouched
+(still used elsewhere). + bumped `SCALE_END_GRACE` 4→8 frames for extra debounce.
+
+**HEADSET VERIFY (Alex — `v0.9.32-scalevalid`):** grab an object with one hand, pinch it with the
+other → two-hand scale should ENGAGE and HOLD steadily (no flicker), scale/rotate smoothly, and the
+world-handle two-hand scale too. Grab itself unchanged (still solid).
+
+**THEN — FINAL COLLAPSE + SHIP** (once scale confirmed): collapse to THUMB-only (drop WRIST/ORIGINAL
+modes + DEBUG button + the GRAB log + grab_diag), update KB `godot-avp-grab-by-point.md` with the full
+resolution, commit the whole batch, TestFlight per `~/knowledge/projects/godot-avp-cascade.md`.
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7h) — v0.9.31-anchorfresh: REMOVED the grab-point restore — READ FIRST
+
+Device app **v0.9.31-anchorfresh** built + installed (validate clean; PCK `871fb626` parity-matched
+`gidtuid…`; install try 1). Default THUMB. **Awaiting Alex's verify.** Restore point on origin/main
+still `e7b66c2` (v0.9.27); consolidation+fixes since are uncommitted (gated on verify).
+
+**v0.9.30 STILL slid to old grab points** (fingers in view). Couldn't pull logs — the device tunnel
+was timing out for `copy` (failed ~7×; install still worked). Diagnosed from code instead, narrowed
+to ONE cause: the only path that keeps an OLD `_grab_point_local` is the restore (`restore=true`); and
+a grab can only fire when both tips are TRACKED (`_get_pickup_value` returns 0 otherwise) so the thumb
+anchor is always fresh AT the grab (never stale). ∴ the snap IS the restore firing. For it to fire,
+`_pinch_view_lost()` had to trip within 600 ms before the release — and the **fast open/release
+gesture flickers the VALID flag** even with the hand in view, so it false-fired on deliberate
+re-grabs. Two flag-based criteria (not-TRACKED v0.9.29, VALID v0.9.30) both mis-fired.
+
+**Fix: REMOVED the grab-point restore entirely.** Every grab recomputes `_grab_point_local` at the
+current thumb — anchors right where you grab, always. Deleted: `wants_grab_point_restore`,
+`_pinch_view_lost`, `_last_pinch_lost_ms/_last_release_uncertain/_last_release_ms/_last_released_body`,
+`POST_DROPOUT_RESTORE_MS`, `REGRAB_RESTORE_MS`, the pinch-lost tracking + release-flag writes, the
+body's restore branch. **The lost-view need is already covered by sticky-release** (it HOLDS the
+object through a dropout — never drops it — so there's nothing to "restore"). Kept a minimal `GRAB
+obj=… thumb_valid=… thumb_tracked=…` log (confirms grabs require TRACKED ⇒ anchor fresh); strip at collapse.
+
+**KEY LESSON (→ KB):** the hand-tracking VALID/TRACKED flags are too noisy to reliably detect a
+"genuine lost view" vs a normal fast open gesture — don't build behavior on a "was tracking lost"
+heuristic. Rely on sticky-release (hold-through-dropout) instead.
+
+**HEADSET VERIFY (Alex — `v0.9.31-anchorfresh`, default THUMB):** grab corner → release (hand in
+view) → grab center → must anchor at CENTER, no slide, every time. If clean → collapse to THUMB-only,
+strip the GRAB log + cycle + DEBUG button, commit, TestFlight.
+
+**Device note:** the AVP tunnel was very flaky this session (copy timeouts; needed a headset restart
+to clear a wedged compositor where no immersive app would present). Keep the headset on-head for log pulls.
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7g) — v0.9.30-grabvalid: lost-view detection = VALID not TRACKED — READ FIRST
+
+Device app **v0.9.30-grabvalid** built + installed (validate clean; PCK `ba6cf8b8` parity-matched
+`gidtuid…`; installed try 1). **Awaiting Alex's verify.** Not committed (restore point `e7b66c2`).
+
+**v0.9.29 STILL slid to old grab points** even with the scoped restore — Alex correctly noted his
+pinch joints weren't dropping out. ROOT CAUSE: the v0.9.29 lost-view detector used
+`_joint_has_tracked_position` (POSITION_VALID **and** POSITION_TRACKED). A HELD OBJECT occludes the
+pinching fingers, so the joints routinely read **VALID-but-not-TRACKED** (estimated) — the handler's
+own earlier notes already documented "tips read 'V-' under occlusion." So `_last_pinch_lost_ms` was
+updated on basically every held frame → EVERY release flagged `_last_release_uncertain` → the restore
+fired on every re-grab → the slide persisted. (Also: I'd stripped the per-grab telemetry in the
+consolidation, so "check my logs" found only the header + SCALE lines — nothing to diagnose from.)
+
+**Fix:** new `_pinch_view_lost()` keys on **POSITION_VALID** only — a genuine lost view = NEITHER tip
+has even an estimated position (hand left the cameras). Normal occluded holding stays "observed", so
+deliberate re-grabs anchor fresh; only a true out-of-view arms the restore. Re-added a MINIMAL one-
+line-per-grab log (`GRAB obj=… restore=… uncertain=… since_release_ms=… same=…`) to verify on device;
+strip at the final collapse.
+
+**General lesson (for the KB):** on this hand path, distinguish VALID (has an estimate) from TRACKED
+(high-confidence). A held object makes the grabbing hand's own pinch joints not-TRACKED as a matter
+of course — so any "is the hand observed" gate that needs TRACKED will false-trigger during every
+normal hold. Use VALID for "do we have a usable position", reserve TRACKED for confidence only.
+
+**HEADSET VERIFY (Alex — `v0.9.30-grabvalid`, default THUMB):** grab a corner, release (hand in
+view), re-grab the center → must anchor at CENTER (no slide). Then I'll pull the GRAB log (expect
+`restore=0` on those deliberate re-grabs). If clean → collapse to THUMB-only + strip the log + TestFlight.
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7f) — v0.9.29-freshgrab: default THUMB + scoped grab-point restore — READ FIRST
+
+Device app **v0.9.29-freshgrab** built + installed (validate clean; PCK `be9dc562` parity-matched
+`gidtuid…`; install needed 1 retry — AVP off-head). **Awaiting Alex's verify.** Consolidation NOT
+committed yet (the v0.9.27 checkpoint `e7b66c2` on origin/main is the restore point).
+
+**Alex's verdict: THUMB feels best.** Default is now THUMB (grab_mode=1; DEBUG still cycles
+WRIST/THUMB/ORIGINAL). Remaining issue he flagged: the grab had "too long a memory" — re-grabbing a
+DIFFERENT spot on the same object slid it to the OLD grab point. Cause: the quick-regrab restore
+(was 1.5s, unconditional) kept the original grab point on ANY re-grab.
+
+**Fix (scoped grab-point restore):** every grab now anchors fresh right where you grab — EXCEPT a
+genuine lost-view recovery. The handler tracks `_last_pinch_lost_ms` (pinch joints untracked while
+held); on release it flags `_last_release_uncertain = (release within POST_DROPOUT_RESTORE_MS=600ms
+of a lost-view)`. The body's pick_up calls `handler.wants_grab_point_restore(self)` → restores the
+original `_grab_point_local` ONLY if that flag is set AND it's the same body within
+REGRAB_RESTORE_MS=1000ms. A clean deliberate release (no recent dropout) → fresh anchor. (Per Alex's
+steer: keep the restore but scope it to lost-view, ~1s window.)
+
+**OPEN — AVP "wrist menu":** Alex asked to disable the AVP wrist menu ("simple one-line setting?").
+Checked `GodotVisionPilot-Info.plist` — no obvious key (it's a CPSceneSessionRoleImmersiveSpace app;
+keys are standard: immersion style, GodotUpperLimbVisibility, hand/world-sensing usage). Not certain
+what the "wrist menu" is in visionOS terms — asked Alex to describe/screenshot before changing
+anything (avoid a hallucinated plist key). Many AVP system affordances (Control Center, Home) aren't
+app-disablable; if it's something else, find the setting.
+
+**HEADSET VERIFY (Alex — `v0.9.29-freshgrab`, default THUMB):**
+1. Grab corner, release, re-grab center → should anchor at CENTER now (no slide to the old corner).
+2. Confirm the clean-release (no spin) + de-spike (no jump) still hold.
+3. Clarify the wrist menu.
+Then: collapse to THUMB-only (drop the cycle + DEBUG button), commit, TestFlight.
+
+---
+
+## ⚠️ STATE (2026-06-02, session 7e) — v0.9.28-finalists: CONSOLIDATED grab + 3-way cycle — READ FIRST
+
+Device app **v0.9.28-finalists** built + installed (validate clean; PCK `89440bab` parity-matched
+`gidtuid…`). **Awaiting Alex's A/B + sign-off.** The v0.9.27 checkpoint is pushed to origin/main
+(`e7b66c2`) as a restore point; THIS consolidation is NOT committed yet (gated on device verify).
+
+**Why:** Alex asked to compare against the original Nowak grab and check if we'd overcomplicated.
+Archaeology (git): original `f7ac2d6` = 401 lines (reparent-ride + IDENTITY centre-snap); the
+good grab-by-point core landed at `35da93b` = 753 lines; we'd drifted to **1394 lines**, ~half of
+it telemetry + the 4-mode A/B multiplexer + dead helpers. Verdict: core not broken, just buried;
+the crazy-rotation-on-release is OUR orientation-following addition (the original didn't follow a
+joint, so it couldn't spin on release).
+
+**v0.9.28 = consolidation (714 lines: body 340 + handler 374).** STRIPPED: GRAB_DIAG/_gdiag, ORICMP,
+PINCH_DIAG, the trace/release/grab-snap probes, glitch-gate, wrist-rigid anchor, palm/locked modes,
+`_has_confident_hand_release_signal`, `_is_controller_profile_input`. KEPT (load-bearing): firm-pinch
+detection, de-spiked midpoint anchor + thumb-tip de-spiked anchor, sticky-release (false-release
+fix), one-euro follow, grab-by-point, two-hand scale integration, throw, highlights, all @exports.
+
+**DEBUG button now cycles 3 FINALISTS** (`grab_mode`, default 0 = WRIST), all on the de-spiked
+**thumb-tip anchor**:
+- **0 WRIST** — thumb-tip pivot + rotation from the WRIST joint (calmest; stable as you open → no spin)
+- **1 THUMB** — thumb-tip pivot + rotation from the THUMB-TIP joint (rotates with the thumb)
+- **2 ORIGINAL** — Nowak reparent-ride (centre-snap, controller pose, no filter) — the baseline
+
+**CLEAN-RELEASE built in (the crazy-rotation-on-release fix):** the handler sets
+`body.follow_suspended=true` the instant the pinch opens; the body then HOLDS its rotation (so the
+opening hand can't spin it) — and a freeze_on_release body also holds position (no thumb-drag), while
+throwable cubes keep following position for throw velocity. (ORIGINAL mode is faithful = no
+clean-release, so it'll still show the baseline release behavior.)
+
+**HEADSET A/B (Alex — `v0.9.28-finalists` on the panel; default WRIST):**
+1. Confirm NO crazy rotation on release in WRIST and THUMB (ORIGINAL will still spin — that's the
+   baseline). 2. Confirm no grab jump (de-spike). 3. Cycle WRIST↔THUMB↔ORIGINAL, pick the winner.
+Then I collapse to the chosen mode (drop the cycle + DEBUG button), commit, and TestFlight.
+
+---
+
 ## ⚠️ STATE (2026-06-02, session 7d) — v0.9.27-thumbfix: THUMB anchor de-spike + freeze-on-open — READ FIRST
 
 Device app **v0.9.27-thumbfix** built + installed (validate clean; PCK `301d6dbd` parity-matched

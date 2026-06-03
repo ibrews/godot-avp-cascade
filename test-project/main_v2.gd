@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.9.27-thumbfix"  # THUMB grab refined: (1) median-of-3 de-spike on the thumb-tip anchor kills the ~15-20cm grab jump (raw thumb pos glitched on ~14% of grabs); (2) freeze-on-open — plates/wall hold pose the instant the pinch opens so the releasing hand doesn't drag them (clean release; cubes still throw). Modes still cycle THUMB/WRIST/PALM/LOCKED
+const APP_VERSION := "v0.9.33-thumbgrab"  # SHIP build: collapsed grab to THUMB-only (thumb-tip anchor for both pivot + rotation, grab-by-point, one-euro, clean-release on open). Removed the WRIST/ORIGINAL A/B modes + the in-world DEBUG button + grab telemetry. Two-hand scale uses thumb+index POSITION_VALID (occlusion-robust)
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -135,7 +135,7 @@ var _scale_active := false
 var _scale_is_world := false
 var _scale_target: Node3D = null
 var _scale_lost_frames := 0   # debounce: brief one-pinch flicker shouldn't end a scale
-const SCALE_END_GRACE := 4    # frames a pinch may be missing before the scale truly ends
+const SCALE_END_GRACE := 8    # frames a pinch may be missing before the scale truly ends (was 4; bumped for occlusion robustness)
 var _scale_A0 := Vector3.ZERO   # world pinch points (L,R) at engage — object case
 var _scale_B0 := Vector3.ZERO
 var _scale_WA := Vector3.ZERO   # world points under the pinches at engage — world case
@@ -174,7 +174,6 @@ var _handle_held_side := ""        # "", "left_hand", or "right_hand"
 var _handle_prev_pinch = null      # Vector3 or null; holder hand's last pinch pos
 var _handle_filt_delta := Vector3.ZERO   # smoothed world-drag delta (a little dampening)
 const HANDLE_DAMP_ALPHA := 0.45    # 0..1 — lower = more dampening on the world-handle drag
-var _grabmode_label: Label3D       # big debug button's mode readout
 var _world_scale_start_dist := 0.0
 var _world_scale_start_scale := Vector3.ONE
 var _world_scale_pivot := Vector3.ZERO  # captured ONCE at scale engage (stable)
@@ -305,7 +304,6 @@ func _ready():
 	_build_control_panel()   # ONE panel: HANDS/START/MUTE/GESTURES/SKY/RESET + BEST readout
 	_build_leaderboard_panel()
 	_build_instructions_panel()
-	_build_grabmode_debug()
 	_fetch_leaderboard()
 	# Launch into immersive (opaque sky) by default, not mixed.
 	_immersive = true
@@ -1485,12 +1483,17 @@ func _which_finger_pinch(side: String) -> int:
 # count as an index pinch — fixing handle-grab firing on middle pinch. Hysteresis
 # (PINCH_START to begin, PINCH_END to release) kills the grab/release flicker.
 func _index_pinch_point(side: String):
-	if not _hand_confident(side):
-		_index_pinch_state[side] = false
-		return null
 	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
 	var ht := XRServer.get_tracker(tname) as XRHandTracker
 	if ht == null or not ht.get_has_tracking_data():
+		_index_pinch_state[side] = false
+		return null
+	# Pinch only needs the THUMB + INDEX to have a usable (VALID) position. The old gate
+	# (_hand_confident = all five fingertips POSITION_TRACKED) made two-hand scale flicker: two
+	# hands pinching close together occlude each other's fingers, dropping a tip to estimated-not-
+	# tracked, which tore the gesture down every few frames (rapid SCALE_ENGAGE/SCALE_END in the
+	# log). VALID holds through occlusion (occlusion drops TRACKED, keeps VALID), so scale stays put.
+	if not ((int(ht.get_hand_joint_flags(5)) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) and (int(ht.get_hand_joint_flags(10)) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID)):
 		_index_pinch_state[side] = false
 		return null
 	var thumb := ht.get_hand_joint_transform(5).origin
@@ -2318,46 +2321,6 @@ func _save_best() -> void:
 		f.store_line(str(_best_score))
 		f.close()
 
-# Big in-world DEBUG button to A/B the one-handed grab behavior live. Poke CYCLE to step
-# PickupAbleBody3D.grab_mode through THUMB / WRIST / PALM / LOCKED (see the mode table in
-# pickup_able_body.gd); the readout shows the active mode. Temporary tuning aid.
-func _build_grabmode_debug() -> void:
-	var root := Node3D.new()
-	root.name = "GrabModeDebug"
-	root.position = Vector3(0.62, 1.28, -0.7)   # to the user's right, within reach
-	add_child(root)
-
-	var bg := MeshInstance3D.new()
-	var q := QuadMesh.new()
-	q.size = Vector2(0.36, 0.26)
-	bg.mesh = q
-	var bgm := StandardMaterial3D.new()
-	bgm.albedo_color = Color(0.06, 0.02, 0.07, 0.9)
-	bgm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	bgm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	bg.material_override = bgm
-	bg.position = Vector3(0, 0, -0.004)
-	root.add_child(bg)
-
-	var title := _panel_label("DEBUG · GRAB MODE", 22, Color(1.0, 0.5, 0.9, 1.0), 7)
-	title.position = Vector3(0, 0.092, 0.004)
-	root.add_child(title)
-
-	_grabmode_label = _panel_label("%d: %s" % [PickupAbleBody3D.grab_mode, PickupAbleBody3D.GRAB_MODE_NAMES[PickupAbleBody3D.grab_mode]], 30, Color(1.0, 0.95, 0.5, 1.0), 9)
-	_grabmode_label.position = Vector3(0, 0.04, 0.004)
-	root.add_child(_grabmode_label)
-
-	_add_poke_button(root, Vector3(0, -0.05, 0.012), "CYCLE  ▶",
-		Color(0.34, 0.10, 0.30), Color(1.0, 0.35, 0.85), _cycle_grab_mode)
-
-# Advance the live grab-follow mode (wired to the debug CYCLE button).
-func _cycle_grab_mode() -> void:
-	PickupAbleBody3D.grab_mode = (PickupAbleBody3D.grab_mode + 1) % PickupAbleBody3D.GRAB_MODE_NAMES.size()
-	var nm: String = PickupAbleBody3D.GRAB_MODE_NAMES[PickupAbleBody3D.grab_mode]
-	if _grabmode_label != null:
-		_grabmode_label.text = "%d: %s" % [PickupAbleBody3D.grab_mode, nm]
-	_gdiag("GRABMODE -> %d %s" % [PickupAbleBody3D.grab_mode, nm])
-	_push_sweep(400.0, 950.0, 0.18)
 
 # Floating cold-open explainer: goal of the game + control map, with small 3D
 # icon "diagrams". Grabbable/movable like the other panels (and self-destructible).
@@ -2895,7 +2858,7 @@ func _append_log(msg: String):
 
 # Append a line to the dedicated grab telemetry file (grab_diag.txt). Pull it with devicectl
 # after a session. Flip GRAB_DIAG off (or delete this + its callers) for release.
-const GRAB_DIAG := true
+const GRAB_DIAG := false   # grab/scale telemetry off for release; flip true to re-enable grab_diag.txt
 func _gdiag(line: String) -> void:
 	if not GRAB_DIAG:
 		return
