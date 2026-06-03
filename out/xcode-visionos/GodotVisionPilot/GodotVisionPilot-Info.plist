@@ -64,6 +64,8 @@
 	
 	<key>GodotUpperLimbVisibility</key>
 	<string>hidden</string>
+	<key>GodotPersistentSystemOverlays</key>
+	<string>hidden</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key><true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

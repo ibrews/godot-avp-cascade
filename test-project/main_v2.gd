@@ -8,7 +8,7 @@ extends Node3D
 # Gestures: index→thumb = grab | middle→thumb = toggle hand mesh | ring→thumb = reset
 
 # Shown on the in-world info panel. Bump on meaningful releases.
-const APP_VERSION := "v0.9.33-thumbgrab"  # SHIP build: collapsed grab to THUMB-only (thumb-tip anchor for both pivot + rotation, grab-by-point, one-euro, clean-release on open). Removed the WRIST/ORIGINAL A/B modes + the in-world DEBUG button + grab telemetry. Two-hand scale uses thumb+index POSITION_VALID (occlusion-robust)
+const APP_VERSION := "v0.9.34-nowrist"  # SHIP build: collapsed grab to THUMB-only (thumb-tip anchor for both pivot + rotation, grab-by-point, one-euro, clean-release on open). Removed the WRIST/ORIGINAL A/B modes + the in-world DEBUG button + grab telemetry. Two-hand scale uses thumb+index POSITION_VALID (occlusion-robust). Hides visionOS persistent system overlays (wrist/Home menu) via GodotPersistentSystemOverlays=hidden Info.plist key — engine already reads it, no rebuild
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
