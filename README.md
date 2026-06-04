@@ -10,6 +10,12 @@ The first publicly-documented Godot `RigidBody3D` physics scene rendering in imm
 
 ![Cascade Countdown on Apple Vision Pro — pinching to grab a glowing physics object in mixed reality](captures/cascade.gif)
 
+## ▶️ Watch the 30-second trailer
+
+[![Watch the Cascade Countdown trailer — 30 seconds, sound on](captures/trailer-poster.jpg)](captures/CascadeCountdown_trailer.mp4)
+
+*Click to play (30s, with sound — the game's procedural soundtrack). Pinch to grab &amp; move, real ↔ virtual hands, the immersion dissolve, two-hand scaling, and the high-score celebration. Scan the on-screen QR at the end to install free from TestFlight.*
+
 > 📖 **New to Godot or visionOS — or just want to see how this was built?** The **[project wiki](https://github.com/ibrews/godot-avp-cascade/wiki)** is a beginner-friendly (ELI5) walkthrough: Godot basics, the hand-tracking pickup, the live-synthesized audio, and the silent-failure gotchas. (This README is the full technical spec.)
 
 ## ▶️ Try it on Apple Vision Pro (TestFlight)
