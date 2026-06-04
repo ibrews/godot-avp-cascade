@@ -89,6 +89,8 @@ captures/             # screen recordings + stills from AVP runs
 
 `main_v2.tscn` has only `XROrigin3D`, `XRCamera3D`, `WorldEnvironment`, `DirectionalLight3D`, and a script. Everything else — the cubes, the catch plate, the deflector wall, the kill-plane Area3D, the grabbable spawn emitter / goal portal / cube→sphere bubble transmuter, the audio player, the physics material, the two `XRController3D` + `PickupHandler3D` hand nodes — is created in code in `_ready()`. Saves editor round-trips during iteration.
 
+![Labeled overview of a round — falling cube, bubble transmuter, deflector ramp, catch plate, and the live leaderboard, composited over a real room](captures/the-cast.jpg)
+
 ## Quickstart (build + deploy)
 
 You need:
