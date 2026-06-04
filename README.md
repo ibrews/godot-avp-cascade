@@ -153,6 +153,8 @@ The key engine-build gotchas (the `XROrigin3D.current=true` requirement, the mob
 
 The **HANDS** button cycles `MESH → BOTH → REAL`. The first two (the virtual GLTF hand mesh) work out of the box. The **REAL** mode — compositing your actual Persona arms over the scene — is controlled by SwiftUI's `.upperLimbVisibility(...)` on the `ImmersiveSpace`, which is **baked at build time** from the `GodotUpperLimbVisibility` key in `Info.plist`. To flip it **live at runtime**, you need a small engine-side change. Without that change the app still runs fine — it just always shows the mesh hands, and the REAL/BOTH modes won't reveal your real arms.
 
+![Cycling the HANDS button — virtual mesh hands, then the player's real Persona arms composited over the room](captures/hands-cycle.gif)
+
 There are two paths:
 
 **Option A — static (no recompile).** Set the visibility once in `out/xcode-visionos/GodotVisionPilot/GodotVisionPilot-Info.plist`:
