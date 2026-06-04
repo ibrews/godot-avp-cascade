@@ -137,6 +137,8 @@ xcrun devicectl device install app \
    ![Beating your best: the running score climbs while cyan confetti and bursts fill the real room](captures/celebration.gif)
 8. **Scale and rotate the whole world.** Pinch the floating chrome handle bar with **both** hands and move them apart / rotate — the world scales and spins around you (the ring turns blue). Pinch any object with both hands to scale just that object (its outline turns blue).
 9. **Switch immersion and listen.** Poke **SKY** (or pinky-pinch) to dissolve the sky between full immersion and passthrough mixed reality — now with a textured tonal swell of well-spaced, varied in-key ticks across the whole transition (pitch rises in, falls out). Mixed reality composites cleanly over passthrough with no halos (see the depth-bias fix below).
+
+   ![Poking SKY dissolves between full immersion and mixed-reality passthrough — the real room fades in and out](captures/immersion-toggle.gif)
 10. **Transmute a cube into a sphere.** Send a falling cube through the floating **bubble** and it comes out the other side as a glowing sphere. Landing one of *each* — a cube and a sphere — back-to-back in the goal pays a **mix bonus**, so the bubble is a scoring tool, not just eye candy (and you can grab and reposition it).
 
 ## Building the engine
