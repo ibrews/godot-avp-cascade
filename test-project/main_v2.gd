@@ -125,6 +125,7 @@ const CUBE_PALETTE := [
 
 var _xr_ok := false
 var _frame_count := 0
+var sim_cursor_world: Variant = null  # set by simulator_input.gd; replaces right-hand index tip
 var _log_timer := 0.0
 var _beat_clock := 0.0       # seconds on the spawn tempo grid; reset to 0 at round start to lock to the bed
 var _last_spawn_step := -1   # last grid subdivision index we spawned on (edge-detect)
@@ -353,6 +354,9 @@ func _ready():
 	if _sky_mat != null:
 		_sky_mat.set_shader_parameter("dissolve", 1.0)  # fully resolved = occludes
 	_write_log("Sandbox built; audio ready; hand tracking active")
+	var sim_input := preload("res://simulator_input.gd").new()
+	sim_input.name = "SimulatorInput"
+	add_child(sim_input)
 
 # ============================================================================
 # SCENE CONSTRUCTION — all geometry built procedurally here (no .tscn content)
@@ -1822,6 +1826,8 @@ func _push_click() -> void:
 # Index fingertip in WORLD space (tracking-space joint rendered through XROrigin,
 # same compensation as the hand mesh — so the poke matches where the finger looks).
 func _index_tip_world(side: String):
+	if sim_cursor_world != null and side == "right_hand":
+		return sim_cursor_world
 	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
 	var ht := XRServer.get_tracker(tname) as XRHandTracker
 	if ht == null or not ht.get_has_tracking_data():

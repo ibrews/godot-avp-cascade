@@ -33,3 +33,6 @@ clancey-godot/
 
 # Local Claude agent/session state (memory, worktrees) — never commit to a public repo
 .claude/
+
+# Compiled sim-input tap (build from tools/SimInputTap.swift)
+tools/siminputtap

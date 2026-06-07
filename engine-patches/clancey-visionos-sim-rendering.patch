@@ -1,0 +1,145 @@
+diff --git a/drivers/metal/metal_device_properties.mm b/drivers/metal/metal_device_properties.mm
+index 2abec4b..e793564 100644
+--- a/drivers/metal/metal_device_properties.mm
++++ b/drivers/metal/metal_device_properties.mm
+@@ -55,7 +55,11 @@
+ #import "servers/rendering/renderer_rd/effects/metal_fx.h"
+ 
+ #import <Metal/Metal.h>
++#import <TargetConditionals.h>
++// MetalFX.framework is device-only — absent from the visionOS Simulator SDK.
++#if !TARGET_OS_SIMULATOR
+ #import <MetalFX/MetalFX.h>
++#endif
+ #import <spirv_cross.hpp>
+ #import <spirv_msl.hpp>
+ 
+@@ -174,11 +178,17 @@
+ 	}
+ 
+ 	if (@available(macOS 13.0, iOS 16.0, tvOS 16.0, *)) {
++#if TARGET_OS_SIMULATOR
++		// MetalFX upscaling is unavailable in the simulator SDK.
++		features.metal_fx_spatial = false;
++		features.metal_fx_temporal = false;
++#else
+ 		features.metal_fx_spatial = [MTLFXSpatialScalerDescriptor supportsDevice:p_device];
+ #ifdef METAL_MFXTEMPORAL_ENABLED
+ 		features.metal_fx_temporal = [MTLFXTemporalScalerDescriptor supportsDevice:p_device];
+ #else
+ 		features.metal_fx_temporal = false;
++#endif
+ #endif
+ 	}
+ }
+diff --git a/drivers/metal/rendering_context_driver_metal.mm b/drivers/metal/rendering_context_driver_metal.mm
+index b32b2a6..cae20b0 100644
+--- a/drivers/metal/rendering_context_driver_metal.mm
++++ b/drivers/metal/rendering_context_driver_metal.mm
+@@ -36,6 +36,7 @@
+ 
+ #import <os/log.h>
+ #import <os/signpost.h>
++#import <TargetConditionals.h>
+ 
+ #if defined(VISIONOS_ENABLED)
+ #include "modules/visionos_xr/visionos_xr_interface.h"
+@@ -212,11 +213,17 @@ void present(MDCommandBuffer *p_cmd_buffer) override final {
+ 		count--;
+ 		front = (front + 1) % frame_buffers.size();
+ 
++#if TARGET_OS_SIMULATOR
++		// presentDrawable:afterMinimumDuration: is unavailable on the visionOS Simulator's
++		// MTLCommandBuffer; the plain present is sufficient for sim timing.
++		[p_cmd_buffer->get_command_buffer() presentDrawable:drawable];
++#else
+ 		if (vsync_mode != DisplayServer::VSYNC_DISABLED) {
+ 			[p_cmd_buffer->get_command_buffer() presentDrawable:drawable afterMinimumDuration:present_minimum_duration];
+ 		} else {
+ 			[p_cmd_buffer->get_command_buffer() presentDrawable:drawable];
+ 		}
++#endif
+ 	}
+ };
+ 
+diff --git a/drivers/metal/rendering_device_driver_metal.mm b/drivers/metal/rendering_device_driver_metal.mm
+index 32444d4..2e969eb 100644
+--- a/drivers/metal/rendering_device_driver_metal.mm
++++ b/drivers/metal/rendering_device_driver_metal.mm
+@@ -2782,6 +2782,12 @@ static MetalDeviceProfile device_profile_from_properties(MetalDeviceProperties *
+ 
+ 	// The Metal renderer requires Apple4 family. This is 2017 era A11 chips and newer.
+ 	if (device_properties->features.highestFamily < MTLGPUFamilyApple4) {
++#if TARGET_OS_SIMULATOR
++		// The visionOS Simulator's Metal device can report a sub-Apple4 family even though it
++		// is backed by the host Apple-Silicon GPU and DOES render this engine. The hard gate
++		// is a false-negative in the simulator, so bypass it there only. (godot-avp pilot.)
++		print_verbose("visionOS simulator: GPU family < Apple4; bypassing the Metal-renderer gate.");
++#else
+ 		String error_string = vformat("Your Apple GPU does not support the following features, which are required to use Metal-based renderers in Godot:\n\n");
+ 		if (!device_properties->features.imageCubeArray) {
+ 			error_string += "- No support for image cube arrays.\n";
+@@ -2795,6 +2801,7 @@ static MetalDeviceProfile device_profile_from_properties(MetalDeviceProperties *
+ #endif
+ 
+ 		return ERR_CANT_CREATE;
++#endif
+ 	}
+ 
+ 	return OK;
+diff --git a/servers/rendering/renderer_rd/effects/metal_fx.mm b/servers/rendering/renderer_rd/effects/metal_fx.mm
+index 0f6152d..69776d1 100644
+--- a/servers/rendering/renderer_rd/effects/metal_fx.mm
++++ b/servers/rendering/renderer_rd/effects/metal_fx.mm
+@@ -35,7 +35,13 @@
+ #import "drivers/metal/rendering_device_driver_metal.h"
+ 
+ #import <Metal/Metal.h>
++#import <TargetConditionals.h>
++// MetalFX (GPU upscaling) is device-only — MetalFX.framework is ABSENT from the visionOS
++// Simulator SDK. All MetalFX use below is feature-gated (SUPPORTS_METALFX_SPATIAL is false
++// in the sim), so on simulator the bodies are unreachable stubs that only need to link.
++#if !TARGET_OS_SIMULATOR
+ #import <MetalFX/MetalFX.h>
++#endif
+ 
+ using namespace RendererRD;
+ 
+@@ -51,6 +57,10 @@
+ }
+ 
+ void MFXSpatialEffect::callback(RDD *p_driver, RDD::CommandBufferID p_command_buffer, CallbackArgs *p_userdata) {
++#if TARGET_OS_SIMULATOR
++	// MetalFX unavailable in the simulator SDK; feature-gated, never invoked. Free + return.
++	CallbackArgs::free(&p_userdata);
++#else
+ 	GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wunguarded-availability")
+ 
+ 	MDCommandBuffer *obj = (MDCommandBuffer *)(p_command_buffer.id);
+@@ -73,6 +83,7 @@
+ 	CallbackArgs::free(&p_userdata);
+ 
+ 	GODOT_CLANG_WARNING_POP
++#endif
+ }
+ 
+ void MFXSpatialEffect::ensure_context(Ref<RenderSceneBuffersRD> p_render_buffers) {
+@@ -96,6 +107,10 @@
+ }
+ 
+ MFXSpatialContext *MFXSpatialEffect::create_context(CreateParams p_params) const {
++#if TARGET_OS_SIMULATOR
++	// MetalFX unavailable in the simulator SDK; feature-gated, never invoked.
++	return nullptr;
++#else
+ 	DEV_ASSERT(RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_SPATIAL));
+ 
+ 	GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wunguarded-availability")
+@@ -121,6 +136,7 @@
+ 	GODOT_CLANG_WARNING_POP
+ 
+ 	return context;
++#endif
+ }
+ 
+ #ifdef METAL_MFXTEMPORAL_ENABLED

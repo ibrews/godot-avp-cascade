@@ -68,6 +68,10 @@ var _recent_jitter_mm : float = 0.0
 var _jit_prev_mid : Vector3 = Vector3.ZERO
 var _jit_have : bool = false
 
+# Simulator override: -1 = inactive (real hand tracking). 0..1 replaces _get_pickup_value
+# and forces _hand_well_observed true so releases don't hang for 2.5 s. Set by simulator_input.gd.
+var sim_pickup_override: float = -1.0
+
 
 # Raw thumb-index fingertip midpoint in TRACKING space, or null if either tip isn't VALID.
 func _raw_fingertip_mid(hand_tracker: XRHandTracker):
@@ -97,6 +101,8 @@ func _sample_jitter() -> void:
 # "Is the hand observed well enough to TRUST a pinch-open as a real release?" Pinch joints tracked and
 # recent jitter low. When false (hand jumping / out of view), the release logic holds the grab.
 func _hand_well_observed() -> bool:
+	if sim_pickup_override >= 0.0:
+		return true
 	var ht := _get_hand_tracker()
 	if ht == null or not ht.get_has_tracking_data():
 		return false
@@ -109,6 +115,8 @@ func _hand_well_observed() -> bool:
 # platform's pinch/grip actions fire from ~2 inches out — far looser than wanted), requiring the tips
 # to actually meet (~1 cm). Physical controllers fall back to the OpenXR action map + generic aliases.
 func _get_pickup_value(controller: XRController3D) -> float:
+	if sim_pickup_override >= 0.0:
+		return sim_pickup_override
 	var hand_tracker := _get_hand_tracker()
 	if hand_tracker != null and hand_tracker.get_has_tracking_data():
 		var index_joint := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
