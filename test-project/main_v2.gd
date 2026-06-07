@@ -18,7 +18,57 @@ const APP_VERSION := "v0.9.34-polish"
 # match — change it here and both follow. See _toggle_immersion / _push_dissolve_texture.
 const SKY_DISSOLVE_SEC := 0.8
 
-const SPAWN_INTERVAL := 0.55
+# --- Cube-spawn RHYTHM ------------------------------------------------------
+# Cube spawns are quantised to a tempo grid so the cascade SOUNDS musical: each cube
+# plays its note exactly on a beat subdivision, locked to the 60 BPM music bed
+# (_bed_sample uses beat_dur = 1.0 s). At 60 BPM one beat = 1.000 s, so "N spawns per
+# second" == N subdivisions per beat:
+#   SPAWN_SUBDIV 1 → quarters (1/s)  2 → eighths (2/s)  3 → triplets (3/s)  4 → sixteenths (4/s)
+# All are subdivisions of the SAME beat, so any value stays locked in 4/4 at one tempo.
+# Default 2 = a steady eighth-note pulse (musical; ~matches the old 0.55 s cadence).
+const SPAWN_BPM := 60.0
+const SPAWN_BEAT_SEC := 60.0 / SPAWN_BPM   # 1.0 s per beat at 60 BPM
+const BEATS_PER_BAR := 4                    # 4/4
+const SPAWN_SUBDIV := 2                      # spawns per beat → 1..4 = 1..4 spawns/sec at 60 BPM
+
+# --- SONG (deterministic music-generator) -----------------------------------
+# A "song" plays the SAME every run: a fixed sequencer drives cube spawns on the beat grid,
+# and each cube's note is fixed by the tables below (notes play ON SPAWN, so the music is
+# reproducible no matter where cubes physically land). SONG_ARRANGEMENT names sections in
+# order (intro/verse/chorus/…/outro); each section is a list of bars; each bar is
+# SONG_STEPS_PER_BAR steps. A step is: -1 = rest, an int = one cube on that scale degree, or
+# an Array of ints = a chord (that many cubes at once → "how many come out at once"). Degrees
+# index C-minor-pentatonic (0=C,1=Eb,2=F,3=G,4=Bb,5=C′…; _bass_freq wraps octaves), raised
+# SONG_LEAD_DEGREE_OFFSET into a lead register. Edit freely to compose a song.
+# SONG_ENABLED=false → fall back to the plain SPAWN_SUBDIV pulse.
+const SONG_ENABLED := true
+const SONG_STEPS_PER_BEAT := 4               # grid resolution: 4 = sixteenth-note steps
+const SONG_STEPS_PER_BAR := SONG_STEPS_PER_BEAT * BEATS_PER_BAR   # 16 at 4×4/4
+const SONG_LEAD_DEGREE_OFFSET := 10          # +2 pentatonic octaves → melodic lead register
+# When true, the random collision chimes are silenced so ONLY the deterministic song sounds
+# (fully reproducible "concert" mode). Default false keeps the lively impact texture too.
+const SONG_PURE_MODE := false
+# Each section is an Array of bars; each bar is SONG_STEPS_PER_BAR (16) steps (see above).
+const SONG_SECTIONS := {
+	"intro": [
+		[0,-1,-1,-1,  2,-1,-1,-1,  3,-1,-1,-1,  4,-1,-1,-1],
+	],
+	"verse": [
+		[0,-1,2,-1,  3,-1,2,-1,  4,-1,3,-1,  2,-1,0,-1],
+		[0,-1,2,-1,  3,-1,4,-1,  5,-1,4,-1,  3,-1,2,-1],
+	],
+	"chorus": [
+		[[0,3],-1,4,-1,  3,-1,4,-1,  [2,5],-1,4,-1,  3,-1,2,-1],
+		[[0,4],-1,4,3,  4,-1,5,-1,  [3,5],-1,4,-1,  2,-1,0,-1],
+	],
+	"bridge": [
+		[3,-1,-1,4,  -1,-1,5,-1,  4,-1,-1,3,  -1,-1,2,-1],
+	],
+	"outro": [
+		[4,-1,-1,-1,  3,-1,-1,-1,  2,-1,-1,-1,  0,-1,-1,-1],
+	],
+}
+const SONG_ARRANGEMENT := ["intro", "verse", "chorus", "verse", "chorus", "bridge", "chorus", "outro"]
 const KILL_Y := -2.0
 const MAX_CUBES := 20
 const GLOBAL_AUDIO_RATE_HZ := 9.0
@@ -76,7 +126,9 @@ const CUBE_PALETTE := [
 var _xr_ok := false
 var _frame_count := 0
 var _log_timer := 0.0
-var _spawn_timer := 0.0
+var _beat_clock := 0.0       # seconds on the spawn tempo grid; reset to 0 at round start to lock to the bed
+var _last_spawn_step := -1   # last grid subdivision index we spawned on (edge-detect)
+var _song_bars: Array = []   # SONG_ARRANGEMENT flattened to an ordered list of bars (built at startup)
 var _last_global_audio := 0.0
 var _physics_material: PhysicsMaterial
 var _shared_audio: AudioStreamPlayer3D
@@ -648,6 +700,7 @@ func _setup_audio():
 	_bed_audio.play()
 	_bed_playback = _bed_audio.get_stream_playback()
 	_build_scale_freqs()
+	_build_song()
 
 # Build one XRController3D + PickupHandler3D + hand mesh per hand.
 func _setup_hands() -> void:
@@ -815,7 +868,6 @@ func _physics_process(delta: float) -> void:
 func _process(delta: float):
 	_frame_count += 1
 	_log_timer += delta
-	_spawn_timer += delta
 	_gesture_cooldown = max(0.0, _gesture_cooldown - delta)
 
 	if _gesture_cooldown <= 0.0:
@@ -860,10 +912,19 @@ func _process(delta: float):
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
 	# the origin about the pinch midpoint) is the next step; per-object scale stays off.
 
-	if _spawn_timer >= SPAWN_INTERVAL:
-		_spawn_timer = 0.0
-		if _active_cubes.size() < MAX_CUBES:
-			_spawn_cube()
+	# Beat-locked spawning on the tempo grid (locked to the 60 BPM bed). SONG_ENABLED → a
+	# deterministic sequencer reads the SONG_* tables and spawns per step (the music
+	# generator); else → the plain SPAWN_SUBDIV pulse. Either way the note plays on spawn.
+	_beat_clock += delta
+	var grid_res: int = SONG_STEPS_PER_BEAT if SONG_ENABLED else SPAWN_SUBDIV
+	var step_dur: float = SPAWN_BEAT_SEC / float(max(grid_res, 1))
+	var grid_step: int = int(floor(_beat_clock / step_dur))
+	if grid_step != _last_spawn_step:
+		_last_spawn_step = grid_step
+		if SONG_ENABLED:
+			_play_song_step(grid_step)
+		elif _active_cubes.size() < MAX_CUBES:
+			_spawn_cube(grid_step)
 	if _log_timer >= 5.0:
 		_log_timer = 0.0
 		_append_log(_grab_diag())
@@ -874,7 +935,7 @@ func _process(delta: float):
 # ============================================================================
 # CUBES — spawn · collision · scoring · goal
 # ============================================================================
-func _spawn_cube():
+func _spawn_cube(step: int = 0, note_degree: int = -1, accent: bool = false):
 	var size: float = randf_range(0.06, 0.12)
 	var color: Color = CUBE_PALETTE[randi() % CUBE_PALETTE.size()]
 	var emission_e: float = randf_range(0.6, 1.75)  # 50% of prior glow (user request)
@@ -986,6 +1047,72 @@ func _spawn_cube():
 	_active_cubes.append(cube)
 	if is_instance_valid(_emitter):
 		_emitter.pulse()
+	# Play this cube's note ON the beat — the lead voice. In song mode the note is the song's
+	# fixed degree (deterministic); in pulse mode it's derived from the grid step.
+	if note_degree >= 0:
+		_play_note_for_degree(note_degree + SONG_LEAD_DEGREE_OFFSET, spawn_pos, accent)
+	else:
+		_play_spawn_note(step, spawn_pos)
+
+# Flatten SONG_ARRANGEMENT → an ordered list of bars the sequencer walks (and loops).
+func _build_song() -> void:
+	_song_bars.clear()
+	for sect_name in SONG_ARRANGEMENT:
+		if SONG_SECTIONS.has(sect_name):
+			for bar in SONG_SECTIONS[sect_name]:
+				_song_bars.append(bar)
+
+# Deterministic sequencer: read the song step at this grid position and spawn its note(s).
+# `step` is the absolute grid index; the song loops over its flattened bars, so it plays the
+# SAME intro→…→outro every run (and restarts from the top on round start via _beat_clock=0).
+func _play_song_step(step: int) -> void:
+	if _song_bars.is_empty():
+		return
+	var nbars: int = _song_bars.size()
+	var bar_idx: int = (int(floor(float(step) / float(SONG_STEPS_PER_BAR))) % nbars + nbars) % nbars
+	var step_in_bar: int = ((step % SONG_STEPS_PER_BAR) + SONG_STEPS_PER_BAR) % SONG_STEPS_PER_BAR
+	var bar: Array = _song_bars[bar_idx]
+	if step_in_bar >= bar.size():
+		return
+	var val = bar[step_in_bar]              # -1 (rest) | int (one note) | Array (chord)
+	var accent: bool = step_in_bar == 0     # bar downbeat
+	match typeof(val):
+		TYPE_INT:
+			if int(val) >= 0:
+				_emit_song_note(int(val), step, accent)
+		TYPE_ARRAY:
+			for d in val:
+				_emit_song_note(int(d), step, accent)
+
+# Spawn one cube on `degree`, OR — if we're at the cube cap — still play the note (no cube)
+# so the SONG stays reproducible regardless of how fast cubes clear the floor.
+func _emit_song_note(degree: int, step: int, accent: bool) -> void:
+	if _active_cubes.size() < MAX_CUBES:
+		_spawn_cube(step, degree, accent)
+	else:
+		var at: Vector3 = _emitter.global_position if is_instance_valid(_emitter) \
+			else Vector3(0.0, SPAWN_HEIGHT, FORWARD_Z)
+		_play_note_for_degree(degree + SONG_LEAD_DEGREE_OFFSET, at, accent)
+
+# Pulse-mode note (SONG_ENABLED=false): derive a melodic degree from the grid step so the
+# plain SPAWN_SUBDIV cadence still sounds like an in-key tune over the bed.
+func _play_spawn_note(step: int, at: Vector3) -> void:
+	var subdiv: int = max(SPAWN_SUBDIV, 1)
+	var sub: int = ((step % subdiv) + subdiv) % subdiv
+	var beat: int = int(floor(float(step) / float(subdiv)))
+	var bar_beat: int = ((beat % BEATS_PER_BAR) + BEATS_PER_BAR) % BEATS_PER_BAR
+	var accent: bool = sub == 0 and bar_beat == 0
+	var degree: int = int(BASS_PATTERN[beat % BASS_PATTERN.size()]) + SONG_LEAD_DEGREE_OFFSET + sub
+	_play_note_for_degree(degree, at, accent)
+
+# Play one scale-degree note (already in lead register) at `at`, on the shared 3D player so it
+# inherits mute via volume_db. The bar downbeat rings fuller (harmonic) and a touch longer.
+func _play_note_for_degree(degree: int, at: Vector3, accent: bool) -> void:
+	if _audio_playback == null:
+		return
+	_shared_audio.position = at
+	var dur: float = 0.075 if accent else 0.05
+	_push_chime(_bass_freq(degree), dur, accent)
 
 func _on_cube_collision(other_body: Node3D, cube: RigidBody3D):
 	_collision_count += 1
@@ -1016,6 +1143,10 @@ func _on_cube_collision(other_body: Node3D, cube: RigidBody3D):
 			ScorePopup3D.spawn(self, cube.global_position, label, _chain_color(chain), false)
 
 	# --- Audio (rate-limited) ---
+	# Pure-song mode silences the random impact chimes so ONLY the deterministic song sounds
+	# (fully reproducible). The impact flash light below also rides this branch.
+	if SONG_PURE_MODE:
+		return
 	if now / 1000.0 - _last_global_audio < 1.0 / GLOBAL_AUDIO_RATE_HZ:
 		return
 	_last_global_audio = now / 1000.0
@@ -1736,6 +1867,8 @@ func _start_round() -> void:
 	_round_score = 0
 	_last_goal_sphere = -1   # fresh mix-bonus chain each round
 	_bed_time = 0.0   # restart the music bed at beat 0
+	_beat_clock = 0.0   # lock the cube-spawn grid to the bed's beat 0
+	_last_spawn_step = -1
 	_start_cooldown = 1.0
 	_push_sweep(300.0, 900.0, 0.25)  # start chirp
 	_refresh_button_label()
