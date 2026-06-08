@@ -29,7 +29,7 @@ const SKY_DISSOLVE_SEC := 0.8
 const SPAWN_BPM := 60.0
 const SPAWN_BEAT_SEC := 60.0 / SPAWN_BPM   # 1.0 s per beat at 60 BPM
 const BEATS_PER_BAR := 4                    # 4/4
-const SPAWN_SUBDIV := 2                      # spawns per beat → 1..4 = 1..4 spawns/sec at 60 BPM
+const SPAWN_SUBDIV := 2                      # MACHINE-GUN rate (spawns/sec at 60 BPM): 1 = 1/s, 2 = 1 per ½s, 4 = 1 per ¼s. One object per tick — never simultaneous.
 
 # --- SONG (deterministic music-generator) -----------------------------------
 # A "song" plays the SAME every run: a fixed sequencer drives cube spawns on the beat grid,
@@ -41,7 +41,7 @@ const SPAWN_SUBDIV := 2                      # spawns per beat → 1..4 = 1..4 s
 # index C-minor-pentatonic (0=C,1=Eb,2=F,3=G,4=Bb,5=C′…; _bass_freq wraps octaves), raised
 # SONG_LEAD_DEGREE_OFFSET into a lead register. Edit freely to compose a song.
 # SONG_ENABLED=false → fall back to the plain SPAWN_SUBDIV pulse.
-const SONG_ENABLED := true
+const SONG_ENABLED := false          # default = the steady monophonic machine-gun pulse (one object per tick, no chords); flip true for the SONG_SECTIONS sequencer
 const SONG_STEPS_PER_BEAT := 4               # grid resolution: 4 = sixteenth-note steps
 const SONG_STEPS_PER_BAR := SONG_STEPS_PER_BEAT * BEATS_PER_BAR   # 16 at 4×4/4
 const SONG_LEAD_DEGREE_OFFSET := 10          # +2 pentatonic octaves → melodic lead register
@@ -58,8 +58,8 @@ const SONG_SECTIONS := {
 		[0,-1,2,-1,  3,-1,4,-1,  5,-1,4,-1,  3,-1,2,-1],
 	],
 	"chorus": [
-		[[0,3],-1,4,-1,  3,-1,4,-1,  [2,5],-1,4,-1,  3,-1,2,-1],
-		[[0,4],-1,4,3,  4,-1,5,-1,  [3,5],-1,4,-1,  2,-1,0,-1],
+		[0,-1,4,-1,  3,-1,4,-1,  2,-1,4,-1,  3,-1,2,-1],
+		[0,-1,4,3,  4,-1,5,-1,  3,-1,4,-1,  2,-1,0,-1],
 	],
 	"bridge": [
 		[3,-1,-1,4,  -1,-1,5,-1,  4,-1,-1,3,  -1,-1,2,-1],
@@ -71,8 +71,12 @@ const SONG_SECTIONS := {
 const SONG_ARRANGEMENT := ["intro", "verse", "chorus", "verse", "chorus", "bridge", "chorus", "outro"]
 const KILL_Y := -2.0
 const MAX_CUBES := 20
-const GLOBAL_AUDIO_RATE_HZ := 9.0
+const GLOBAL_AUDIO_RATE_HZ := 4.0   # max collision-sound rate (Hz); was 9 — lowered so impacts don't bury the 2/s spawn melody
+const HIT_SOUND_MIN_SPEED := 2.5    # only collisions faster than this (m/s) sound — quiets rolling/settling/micro-bounce knocks
+const FX_SWELL_MIN_GAP_MS := 450    # min gap between bubble swap swells — passive cascade roll-through shouldn't machine-gun the whoosh
 const SAMPLE_RATE := 44100.0
+const BED_BUFFER_SEC := 0.5   # music-bed generator buffer length; ALSO the spawn-clock sync offset (see _process)
+const LOG_SOUND_TIMING := true   # print [SPAWN]/[SND] onset timestamps so the rhythm (and any double-fire) is visible in the log
 const FORWARD_Z := -1.3
 # Lift the whole course up to roughly chest/eye height so nothing sits in the floor.
 const BASE_HEIGHT := 0.9
@@ -127,7 +131,7 @@ var _xr_ok := false
 var _frame_count := 0
 var sim_cursor_world: Variant = null  # set by simulator_input.gd; replaces right-hand index tip
 var _log_timer := 0.0
-var _beat_clock := 0.0       # seconds on the spawn tempo grid; reset to 0 at round start to lock to the bed
+var _beat_clock := 0.0       # spawn tempo-grid clock; slaved to the bed's playback position during a round (see _process) so spawns lock to the percussion
 var _last_spawn_step := -1   # last grid subdivision index we spawned on (edge-detect)
 var _song_bars: Array = []   # SONG_ARRANGEMENT flattened to an ordered list of bars (built at startup)
 var _last_global_audio := 0.0
@@ -141,6 +145,11 @@ var _audio_playback: AudioStreamGeneratorPlayback
 # AudioStreamPlayer with its own generator/playback. See KB godot-avp-procedural-audio.
 var _bed_audio: AudioStreamPlayer
 var _bed_playback: AudioStreamGeneratorPlayback
+var _fx_audio: AudioStreamPlayer3D            # routed to the "BubbleFX" reverb+phaser bus
+var _fx_playback: AudioStreamGeneratorPlayback
+var _snd_t0_ms := 0            # reference time (round start) for sound-onset logging
+var _last_spawn_snd_ms := 0    # wall time of the previous spawn note (for the inter-onset interval)
+var _last_fx_ms := 0           # wall time of the previous bubble swap swell (rate-limit gate)
 var _bed_time := 0.0
 # ONE key for everything melodic — C minor pentatonic. The bass riff, the urgency
 # tones AND the random cube-collision chimes all snap to these notes so the chaotic
@@ -354,6 +363,10 @@ func _ready():
 	if _sky_mat != null:
 		_sky_mat.set_shader_parameter("dissolve", 1.0)  # fully resolved = occludes
 	_write_log("Sandbox built; audio ready; hand tracking active")
+	# Simulator prototyping: the visionOS Simulator has no hand input to start a round, so auto-start
+	# one (bed + sync audible). Sim-only (SIMULATOR_DEVICE_NAME) → no-op on a real headset.
+	if OS.has_environment("SIMULATOR_DEVICE_NAME"):
+		_start_round()
 	var sim_input := preload("res://simulator_input.gd").new()
 	sim_input.name = "SimulatorInput"
 	add_child(sim_input)
@@ -697,12 +710,37 @@ func _setup_audio():
 	_bed_audio = AudioStreamPlayer.new()
 	var bed_gen := AudioStreamGenerator.new()
 	bed_gen.mix_rate = SAMPLE_RATE
-	bed_gen.buffer_length = 0.5
+	bed_gen.buffer_length = BED_BUFFER_SEC
 	_bed_audio.stream = bed_gen
 	_bed_audio.volume_db = -10.0
 	add_child(_bed_audio)
 	_bed_audio.play()
 	_bed_playback = _bed_audio.get_stream_playback()
+
+	# --- BubbleFX bus: just a touch of reverb for the subtle bubble warble (NOT an engine room) ---
+	if AudioServer.get_bus_index("BubbleFX") == -1:
+		var fx_idx := AudioServer.bus_count
+		AudioServer.add_bus()                      # appended → its index == old bus_count
+		AudioServer.set_bus_name(fx_idx, "BubbleFX")
+		AudioServer.set_bus_send(fx_idx, "Master")
+		var reverb := AudioEffectReverb.new()
+		reverb.room_size = 0.4
+		reverb.wet = 0.12          # a hint of space, not a cavern
+		reverb.dry = 0.9
+		reverb.spread = 0.5
+		AudioServer.add_bus_effect(fx_idx, reverb)
+	_fx_audio = AudioStreamPlayer3D.new()
+	var fx_gen := AudioStreamGenerator.new()
+	fx_gen.mix_rate = SAMPLE_RATE
+	fx_gen.buffer_length = 0.5
+	_fx_audio.stream = fx_gen
+	_fx_audio.bus = "BubbleFX"
+	_fx_audio.volume_db = -10.0
+	_fx_audio.max_distance = 6.0
+	_fx_audio.unit_size = 1.0
+	add_child(_fx_audio)
+	_fx_audio.play()
+	_fx_playback = _fx_audio.get_stream_playback()
 	_build_scale_freqs()
 	_build_song()
 
@@ -916,10 +954,21 @@ func _process(delta: float):
 	# world — zero physics bodies move, so no freeze and no jitter. World-scale (scaling
 	# the origin about the pinch midpoint) is the next step; per-object scale stays off.
 
-	# Beat-locked spawning on the tempo grid (locked to the 60 BPM bed). SONG_ENABLED → a
-	# deterministic sequencer reads the SONG_* tables and spawns per step (the music
-	# generator); else → the plain SPAWN_SUBDIV pulse. Either way the note plays on spawn.
-	_beat_clock += delta
+	# Beat-locked spawning on the tempo grid. SONG_ENABLED → a deterministic sequencer reads
+	# the SONG_* tables and spawns per step (the music generator); else → the plain
+	# SPAWN_SUBDIV pulse. Either way the note plays on spawn.
+	#
+	# SYNC: during a round, derive the beat clock from the BED's own audio-sample clock — its
+	# PLAYBACK position (_bed_time write-head minus the bed's buffer latency) — so the bed
+	# percussion (kick/bass/hat synthesised in _bed_sample) and the spawn song ride ONE
+	# drift-free timeline and land together at the ear. (Subtract the buffer: the bed is
+	# continuously buffered ~BED_BUFFER_SEC ahead, but the spawn chimes are near-instant, so
+	# matching the bed's PLAYBACK time — not its write head — is what aligns them.) This also
+	# makes the song start cleanly at step 0 on round start. Outside a round → free-run.
+	if _timer_active:
+		_beat_clock = maxf(0.0, _bed_time - BED_BUFFER_SEC)
+	else:
+		_beat_clock += delta
 	var grid_res: int = SONG_STEPS_PER_BEAT if SONG_ENABLED else SPAWN_SUBDIV
 	var step_dur: float = SPAWN_BEAT_SEC / float(max(grid_res, 1))
 	var grid_step: int = int(floor(_beat_clock / step_dur))
@@ -964,8 +1013,9 @@ func _spawn_cube(step: int = 0, note_degree: int = -1, accent: bool = false):
 
 	var mi := MeshInstance3D.new()
 	mi.name = "Mesh"
-	var bm := BoxMesh.new()
-	bm.size = Vector3(size, size, size)
+	var bm := SphereMesh.new()   # spheres by default — they bounce/roll predictably (the bubble swaps them to cubes)
+	bm.radius = size * 0.5
+	bm.height = size
 	mi.mesh = bm
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -1003,8 +1053,8 @@ func _spawn_cube(step: int = 0, note_degree: int = -1, accent: bool = false):
 
 	var cs := CollisionShape3D.new()
 	cs.name = "Shape"
-	var sh := BoxShape3D.new()
-	sh.size = Vector3(size, size, size)
+	var sh := SphereShape3D.new()
+	sh.radius = size * 0.5
 	cs.shape = sh
 	cube.add_child(cs)
 	_ensure_min_grab_collider(cube)  # #5: small cubes get a grab-friendly collider
@@ -1045,6 +1095,7 @@ func _spawn_cube(step: int = 0, note_degree: int = -1, accent: bool = false):
 	cube.angular_velocity = Vector3(
 		randf_range(-2.5, 2.5), randf_range(-2.5, 2.5), randf_range(-2.5, 2.5))
 	cube.add_to_group("cube")
+	cube.add_to_group("sphere")   # default object IS a sphere; the bubble transmutes it cube↔sphere
 	cube.body_entered.connect(_on_cube_collision.bind(cube))
 	_world_root.add_child(cube)
 	cube.global_position = spawn_pos + Vector3(randf_range(-0.04, 0.04), -0.05, randf_range(-0.04, 0.04))
@@ -1057,6 +1108,7 @@ func _spawn_cube(step: int = 0, note_degree: int = -1, accent: bool = false):
 		_play_note_for_degree(note_degree + SONG_LEAD_DEGREE_OFFSET, spawn_pos, accent)
 	else:
 		_play_spawn_note(step, spawn_pos)
+	_log_spawn(step)
 
 # Flatten SONG_ARRANGEMENT → an ordered list of bars the sequencer walks (and loops).
 func _build_song() -> void:
@@ -1151,6 +1203,10 @@ func _on_cube_collision(other_body: Node3D, cube: RigidBody3D):
 	# (fully reproducible). The impact flash light below also rides this branch.
 	if SONG_PURE_MODE:
 		return
+	# Only SOLID impacts sound — quiet rolling/settling/micro-bounces (the collision flurry that
+	# muddied the rhythm). Keeps the punchy drops, kills the cacophony.
+	if cube.linear_velocity.length() < HIT_SOUND_MIN_SPEED:
+		return
 	if now / 1000.0 - _last_global_audio < 1.0 / GLOBAL_AUDIO_RATE_HZ:
 		return
 	_last_global_audio = now / 1000.0
@@ -1167,28 +1223,44 @@ func _on_cube_collision(other_body: Node3D, cube: RigidBody3D):
 		_push_chime(_snap_to_scale(randf_range(180.0, 420.0)), 0.14, true)
 	else:
 		_push_chime(_snap_to_scale(randf_range(260.0, 700.0)), 0.10, true)
+	_log_snd("hit")
 
 func _on_bubble_passed(cube: Node3D, at: Vector3):
-	if not is_instance_valid(cube) or cube.is_in_group("sphere"):
+	if not is_instance_valid(cube):
 		return
-	cube.add_to_group("sphere")
+	# Debounce: one swap per pass (the detector can re-fire if an object lingers or bounces).
+	var now := Time.get_ticks_msec()
+	if now - int(cube.get_meta("last_swap_ms", 0)) < 250:
+		return
+	cube.set_meta("last_swap_ms", now)
 	var size: float = cube.get_meta("size", 0.09)
-	# Swap box mesh → sphere mesh (keep the material/emission).
 	var mi := cube.get_node_or_null("Mesh")
-	if mi and mi is MeshInstance3D:
-		var sm := SphereMesh.new()
-		sm.radius = size * 0.5
-		sm.height = size
-		mi.mesh = sm
-	# Swap box shape → sphere shape so it rolls.
 	var cs := cube.get_node_or_null("Shape")
-	if cs and cs is CollisionShape3D:
-		var ss := SphereShape3D.new()
-		ss.radius = size * 0.5
-		cs.shape = ss
-	# A soft "bloop" to mark the transmutation.
-	_shared_audio.position = at
-	_push_chime(520.0, 0.12, true)
+	if cube.is_in_group("sphere"):
+		# SPHERE → CUBE
+		cube.remove_from_group("sphere")
+		if mi and mi is MeshInstance3D:
+			var bm := BoxMesh.new()
+			bm.size = Vector3(size, size, size)
+			(mi as MeshInstance3D).mesh = bm
+		if cs and cs is CollisionShape3D:
+			var bs := BoxShape3D.new()
+			bs.size = Vector3(size, size, size)
+			(cs as CollisionShape3D).shape = bs
+	else:
+		# CUBE → SPHERE
+		cube.add_to_group("sphere")
+		if mi and mi is MeshInstance3D:
+			var sm := SphereMesh.new()
+			sm.radius = size * 0.5
+			sm.height = size
+			(mi as MeshInstance3D).mesh = sm
+		if cs and cs is CollisionShape3D:
+			var ss := SphereShape3D.new()
+			ss.radius = size * 0.5
+			(cs as CollisionShape3D).shape = ss
+	# Mark the swap with a subtle warble through the BubbleFX bus.
+	_push_bubble_warble(at)
 
 func _on_portal_entered(cube: Node3D, at: Vector3):
 	if not is_instance_valid(cube):
@@ -1409,6 +1481,53 @@ func _push_chime(freq: float, duration: float, harmonic: bool):
 		else:
 			s = sin(TAU * freq * t) * env * 0.42
 		_audio_playback.push_frame(Vector2(s, s))
+
+# A subtle warble through the BubbleFX bus — a soft, quiet vibrato tone marking an object's
+# passage through the bubble. Intentionally understated: nothing loud or attention-grabbing.
+func _push_bubble_warble(at: Vector3) -> void:
+	if _fx_playback == null or _muted:
+		return
+	var now := Time.get_ticks_msec()
+	if now - _last_fx_ms < FX_SWELL_MIN_GAP_MS:
+		return
+	_last_fx_ms = now
+	_fx_audio.position = at
+	var dur := 0.3
+	var n := int(SAMPLE_RATE * dur)
+	var to_fill: int = min(n, _fx_playback.get_frames_available())
+	var phase := 0.0
+	for i in range(to_fill):
+		var u := float(i) / float(n)
+		var ti := float(i) / SAMPLE_RATE
+		# Soft mid tone whose pitch gently wobbles (±5% at ~7 Hz) — the "warble".
+		var freq := 520.0 * (1.0 + 0.05 * sin(TAU * 7.0 * ti))
+		phase += TAU * freq / SAMPLE_RATE
+		var env := sin(PI * u)
+		var s := sin(phase) * env * 0.15   # quiet
+		_fx_playback.push_frame(Vector2(s, s))
+	_log_snd("warble")
+
+# Sound-onset logging — [SPAWN] lines carry the inter-onset interval (dt) so the machine-gun
+# rhythm is legible (should be ~constant at 1000/SPAWN_SUBDIV ms); [SND] tags hits/swells.
+func _log_spawn(step: int) -> void:
+	if not LOG_SOUND_TIMING:
+		return
+	var now := Time.get_ticks_msec()
+	if _snd_t0_ms == 0:
+		_snd_t0_ms = now
+	var t := float(now - _snd_t0_ms) / 1000.0
+	var dt := now - _last_spawn_snd_ms
+	_last_spawn_snd_ms = now
+	print("[SPAWN] t=%8.3f  dt=%4dms  step=%d  active=%d" % [t, dt, step, _active_cubes.size()])
+
+func _log_snd(tag: String) -> void:
+	if not LOG_SOUND_TIMING:
+		return
+	var now := Time.get_ticks_msec()
+	if _snd_t0_ms == 0:
+		_snd_t0_ms = now
+	var t := float(now - _snd_t0_ms) / 1000.0
+	print("[SND]   t=%8.3f  %s" % [t, tag])
 
 # Frequency sweep from f0→f1 over `dur` — used for toggle whooshes.
 func _push_sweep(f0: float, f1: float, dur: float):
@@ -1875,6 +1994,8 @@ func _start_round() -> void:
 	_bed_time = 0.0   # restart the music bed at beat 0
 	_beat_clock = 0.0   # lock the cube-spawn grid to the bed's beat 0
 	_last_spawn_step = -1
+	_snd_t0_ms = Time.get_ticks_msec()
+	_last_spawn_snd_ms = _snd_t0_ms
 	_start_cooldown = 1.0
 	_push_sweep(300.0, 900.0, 0.25)  # start chirp
 	_refresh_button_label()
@@ -2076,6 +2197,8 @@ func _toggle_mute() -> void:
 		_shared_audio.volume_db = -80.0 if _muted else -3.0
 	if _bed_audio != null:
 		_bed_audio.volume_db = -80.0 if _muted else -10.0
+	if _fx_audio != null:
+		_fx_audio.volume_db = -80.0 if _muted else -10.0
 	_refresh_mute_label()
 	# A confirming blip plays only when turning sound back ON (volume already restored).
 	if not _muted:

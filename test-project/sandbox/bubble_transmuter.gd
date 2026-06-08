@@ -70,8 +70,9 @@ func _ready() -> void:
 	add_child(detector)
 
 func _on_detector_body_entered(body: Node3D) -> void:
-	# Only cubes transmute — spheres (already transmuted) pass silently.
-	if body.is_in_group("cube") and not body.is_in_group("sphere"):
+	# Any falling object swaps as it passes through (cube↔sphere); main handles the geometry
+	# swap + the reverb/phaser swell. (Everything is in group "cube"; "sphere" is the type flag.)
+	if body.is_in_group("cube"):
 		_vibrate = 1.0
 		emit_signal("cube_passed", body, global_position)
 
