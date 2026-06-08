@@ -23,6 +23,14 @@ var _sim_active := false
 var _udp := PacketPeerUDP.new()
 var _c_held := false
 
+# Rigid-to-head grab: once a body is actually held, the handler rides a FIXED pose relative to the
+# camera (captured at the grab instant) instead of the view-centre raycast hit. That gives the held
+# object a steady distance and makes it move AND rotate with the head, like a child of the camera —
+# and (with C as a toggle, mouse free) it follows the view while you Option-drag look. The raycast is
+# kept ONLY for the initial reach/pick (the handler must sit on the target to grab it).
+var _was_holding := false
+var _grab_cam_offset := Transform3D.IDENTITY
+
 func _ready() -> void:
 	_main = get_parent()
 	# Simulator-only (bulletproof: these env vars exist only in the sim process, never device).
@@ -58,14 +66,35 @@ func _process(_delta: float) -> void:
 		if cmd != "":
 			_handle_cmd(cmd)
 
-	# Grab follows the view-centre while held; feeds BOTH the pickup handler and the poke-
-	# button proximity test (_index_tip_world returns sim_cursor_world for the right hand).
-	var cursor := _cursor_world() if _c_held else Vector3.ZERO
-	_main.sim_cursor_world = cursor if _c_held else null
-	if is_instance_valid(_handler):
-		_handler.sim_pickup_override = 1.0 if _c_held else 0.0
-		if _c_held:
-			_handler.global_position = cursor
+	if not is_instance_valid(_handler):
+		return
+
+	if not _c_held:
+		_handler.sim_pickup_override = 0.0
+		_main.sim_cursor_world = null
+		_was_holding = false
+		return
+
+	_handler.sim_pickup_override = 1.0
+	var cam := get_viewport().get_camera_3d()
+
+	# Once a body is actually held, ride a fixed camera-relative pose (rigid-to-head): constant
+	# distance, follows head translation AND rotation. Pre-grab we still drive the handler to the
+	# view-centre raycast hit so it can reach and grab the target under the cursor.
+	if _handler.picked_up_body != null and is_instance_valid(cam):
+		if not _was_holding:
+			# Capture the handler's pose relative to the camera at the instant of grab, so the
+			# object stays exactly where it was grabbed and then rides the head from there.
+			_grab_cam_offset = cam.global_transform.affine_inverse() * _handler.global_transform
+		_handler.global_transform = cam.global_transform * _grab_cam_offset
+		_was_holding = true
+	else:
+		_handler.global_position = _cursor_world()
+		_was_holding = false
+
+	# Feed the poke-button proximity test (_index_tip_world returns sim_cursor_world for the right
+	# hand): the "hand" is wherever the handler now sits (raycast hit pre-grab, held point after).
+	_main.sim_cursor_world = _handler.global_position
 
 func _handle_cmd(cmd: String) -> void:
 	_diag("rx:" + cmd)
