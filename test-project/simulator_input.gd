@@ -28,6 +28,7 @@ const _CALIB_KEYS := {
 	"D": "depth",       # SIMHANDS_DEPTH_M        — wrist distance in front of the origin
 	"Y": "y_offset",    # SIMHANDS_Y_OFFSET_M     — head-relative height (pre floor offset)
 	"Z": "z_gain",      # SIMHANDS_Z_SHAPE_GAIN   — finger-curl depth from MediaPipe z
+	"M": "smoothing",   # SIMHANDS_SMOOTHING      — hand stabilizer 0=raw .. 1=max (sMoothing slider)
 }
 
 var _main: Node3D
@@ -116,6 +117,12 @@ func _handle_cmd(cmd: String) -> void:
 	if cmd.length() >= 1 and cmd[0] == "K":
 		_handle_calibration(cmd)
 		return
+	# Hand-source select ("H0"/"H1"/"H2": 0=off, 1=canned panel feed, 2=webcam real helper) picks
+	# which Bonjour feed drives the SimHands bridge, so the panel, the canned sender, and the real
+	# webcam helper can all stay connected while only one drives. See _handle_source.
+	if cmd.length() >= 2 and cmd[0] == "H":
+		_handle_source(cmd)
+		return
 	match cmd:
 		"C1":
 			_c_held = true
@@ -157,6 +164,21 @@ func _reset_calibration() -> void:
 	if d != null and d.file_exists("simhands_calibration.cfg"):
 		d.remove("simhands_calibration.cfg")
 	_diag("calib reset")
+
+# Parse an "H<n>" hand-source packet (0=off, 1=canned, 2=webcam) and persist it to the "source" key
+# of user://simhands_calibration.cfg, which the native bridge polls (~9 Hz) to restrict which
+# connected MultipeerConnectivity peer drives the trackers — so every hand feed can stay connected
+# while only one drives. Only acts when GODOT_SIMHANDS is set; on a real headset ARKit drives the
+# hands and none of this runs.
+func _handle_source(cmd: String) -> void:
+	var n := cmd.substr(1).to_int()
+	if n < 0 or n > 2:
+		return
+	var cf := ConfigFile.new()
+	cf.load(_CALIB_PATH)  # OK if absent — we just add/overwrite the source key
+	cf.set_value("simhands", "source", n)
+	cf.save(_CALIB_PATH)
+	_diag("source=%d" % n)
 
 # Append-only diagnostic so a headless run can confirm packets arrive. Pull via
 # simctl get_app_container ... data -> Documents/sim_keys.txt.

@@ -193,6 +193,7 @@ final class SimController {
     var depth     = 0.45    // KD  SIMHANDS_DEPTH_M         (wrist distance in front of origin)
     var yOffset   = -0.10   // KY  SIMHANDS_Y_OFFSET_M      (head-relative height, pre floor offset)
     var zGain     = 1.0     // KZ  SIMHANDS_Z_SHAPE_GAIN    (finger-curl depth from MediaPipe z)
+    var smoothing = 0.9     // KM  SIMHANDS_SMOOTHING       (hand stabilizer 0=raw .. 1=max)
 
     private var lastSent: [String: Date] = [:]
 
@@ -238,11 +239,12 @@ final class SimController {
         sendCalib("D", depth, force: true)
         sendCalib("Y", yOffset, force: true)
         sendCalib("Z", zGain, force: true)
+        sendCalib("M", smoothing, force: true)
     }
 
     /// Reset sliders to first-light defaults and tell the bridge to drop the cfg (→ its defaults).
     func resetCalib() {
-        handScale = 0.09; plane = 0.55; depth = 0.45; yOffset = -0.10; zGain = 1.0
+        handScale = 0.09; plane = 0.55; depth = 0.45; yOffset = -0.10; zGain = 1.0; smoothing = 0.9
         udp.send("KR")
     }
 }
@@ -353,6 +355,8 @@ struct ContentView: View {
                                 range: 0.15...1.0, send: send)
                     CalibSlider(title: "Hand scale (m)", key: "S", value: $c.handScale,
                                 range: 0.04...0.18, send: send)
+                    CalibSlider(title: "Smoothing", key: "M", value: $c.smoothing,
+                                range: 0.0...1.0, send: send)
                     DisclosureGroup("Advanced") {
                         VStack(alignment: .leading, spacing: 7) {
                             CalibSlider(title: "Plane (m)", key: "P", value: $c.plane,
