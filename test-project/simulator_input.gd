@@ -45,6 +45,16 @@ var _c_held := false
 var _was_holding := false
 var _grab_cam_offset := Transform3D.IDENTITY
 
+# Sim grab take-over (panel Grab latch / SimInputTap left-click): while engaged we drive the
+# right-hand handler ourselves — suppress its fingertip anchor (so a canned hand feed can't yank it
+# off our cursor) and force the pinch closed. Forgiving target acquisition + a DIRECT grab make the
+# latch reliable: the handler's own detect-sphere + single pinch-edge missed anything that wasn't
+# already inside 0.3 m at the click instant (so aiming at a falling sphere almost never caught).
+var _grab_active := false
+var _saved_follow := true
+const _GRAB_REACH_M := 4.0           # how far ahead we look for a grabbable
+const _GRAB_CONE_DOT := 0.8          # forward-cone cos (~37° half-angle): nearest grabbable in this cone
+
 # Head-tracking prototype (#7): a fake (panel head-pad) or, later, webcam face signal moves the
 # XROrigin so the rendered viewpoint travels with the head — same mechanism as WASD nav and the hand
 # WASD-follow (move the XROrigin, NOT the native head_tracker; the sim head pose doesn't match the
@@ -83,6 +93,48 @@ func _cursor_world() -> Vector3:
 	var hit := _main.get_world_3d().direct_space_state.intersect_ray(q)
 	return hit["position"] if hit else from + fwd
 
+# Acquire the best grabbable for a sim grab: first whatever the view centre points at (precise aim),
+# else the nearest un-held grabbable within a forward cone (forgiving — you don't have to pixel-aim a
+# falling sphere). Scans the active falling cubes AND the placed grabbables. Returns null if none.
+func _acquire_grab_target(cam: Camera3D) -> PickupAbleBody3D:
+	var from := cam.global_position
+	var fwd := -cam.global_transform.basis.z
+	# 1. Precise: a grabbable directly under the view centre (reach _GRAB_REACH_M).
+	var q := PhysicsRayQueryParameters3D.create(from, from + fwd * _GRAB_REACH_M)
+	q.collision_mask = 3  # LAYER_SOLID | LAYER_GRAB_ONLY
+	var hit := _main.get_world_3d().direct_space_state.intersect_ray(q)
+	if hit and hit.has("collider"):
+		var c = hit["collider"]
+		if c is PickupAbleBody3D and not c.is_picked_up():
+			return c
+	# 2. Forgiving: nearest un-held grabbable inside a forward cone.
+	var best: PickupAbleBody3D = null
+	var best_d := _GRAB_REACH_M
+	for arr in [_main._active_cubes, _main._grabbables]:
+		for b in arr:
+			if not is_instance_valid(b) or not (b is PickupAbleBody3D) or b.is_picked_up():
+				continue
+			var to: Vector3 = b.global_position - from
+			var d := to.length()
+			if d < 0.05 or d > best_d:
+				continue
+			if to.normalized().dot(fwd) < _GRAB_CONE_DOT:
+				continue
+			best_d = d
+			best = b
+	return best
+
+# End a sim grab: let go of anything held and restore the handler's normal fingertip-follow.
+func _end_sim_grab() -> void:
+	_grab_active = false
+	if not is_instance_valid(_handler):
+		return
+	if _handler.picked_up_body != null:
+		_handler.picked_up_body.let_go()
+		_handler.picked_up_body = null
+		_handler.was_pickup_pressed = false
+	_handler.follow_fingertips = _saved_follow
+
 func _process(delta: float) -> void:
 	if not _sim_active:
 		return
@@ -109,30 +161,50 @@ func _process(delta: float) -> void:
 		return
 
 	if not _c_held:
-		_handler.sim_pickup_override = 0.0
+		# Grab released: hand the right-hand handler back to its REAL pinch. Use -1.0 (INACTIVE), NOT
+		# 0.0 — 0.0 is a valid override that PINS the hand open, which silently swallowed the canned/
+		# webcam feed's pinch on the right hand ("pinch only kind of worked"). -1.0 lets the handler
+		# read its actual thumb-index distance again.
+		if _grab_active:
+			_end_sim_grab()
+		_handler.sim_pickup_override = -1.0
 		_main.sim_cursor_world = null
 		_was_holding = false
 		return
 
+	# Grab engaged (panel Grab latch / SimInputTap left-click). Take over the right-hand handler.
+	if not _grab_active:
+		_grab_active = true
+		_saved_follow = _handler.follow_fingertips
+		_handler.follow_fingertips = false   # we own the handler position; don't let a feed move it
 	_handler.sim_pickup_override = 1.0
 	var cam := get_viewport().get_camera_3d()
+	if not is_instance_valid(cam):
+		return
 
-	# Once a body is actually held, ride a fixed camera-relative pose (rigid-to-head): constant
-	# distance, follows head translation AND rotation. Pre-grab we still drive the handler to the
-	# view-centre raycast hit so it can reach and grab the target under the cursor.
-	if _handler.picked_up_body != null and is_instance_valid(cam):
+	if _handler.picked_up_body != null:
+		# Holding — ride a fixed camera-relative pose (rigid-to-head): constant distance, follows the
+		# head as you look / WASD. THIS is "drag directly": move/look and the held object follows.
 		if not _was_holding:
-			# Capture the handler's pose relative to the camera at the instant of grab, so the
-			# object stays exactly where it was grabbed and then rides the head from there.
 			_grab_cam_offset = cam.global_transform.affine_inverse() * _handler.global_transform
 		_handler.global_transform = cam.global_transform * _grab_cam_offset
 		_was_holding = true
 	else:
-		_handler.global_position = _cursor_world()
+		# Not holding yet — acquire the grabbable you're looking at (or the nearest one in a forward
+		# cone) and grab it DIRECTLY. The handler's detect-sphere + single pinch-edge missed anything
+		# not already inside 0.3 m at the click; a latch fires that edge once, so it never caught up.
+		var tgt := _acquire_grab_target(cam)
+		if is_instance_valid(tgt):
+			_handler.global_position = tgt.global_position
+			_handler.picked_up_body = tgt
+			tgt.pick_up(_handler)
+			_handler.was_pickup_pressed = true   # hand the held state to the handler's release latch
+		else:
+			_handler.global_position = _cursor_world()
 		_was_holding = false
 
 	# Feed the poke-button proximity test (_index_tip_world returns sim_cursor_world for the right
-	# hand): the "hand" is wherever the handler now sits (raycast hit pre-grab, held point after).
+	# hand): the "hand" is wherever the handler now sits (cursor pre-grab, held point after).
 	_main.sim_cursor_world = _handler.global_position
 
 func _handle_cmd(cmd: String) -> void:
