@@ -72,7 +72,7 @@ test-project/
   main_v2.gd          # Cascade Countdown script (~2.8k lines, banner-sectioned) — spawn, physics, audio, hand setup, scoring
   hand_mesh_driver.gd # HandMeshDriver3D — poses the GLTF hand mesh from XRHandTracker joints (bone-frame correction)
   pickup/
-    pickup_handler.gd # PickupHandler3D — pinch detection, fingertip anchoring (Marshall Nowak)
+    pickup_handler.gd # PickupHandler3D — pinch detection, fingertip anchoring (Clancey)
     pickup_able_body.gd # PickupAbleBody3D — grab/snap/throw logic with velocity tracking
   sandbox/            # the procedural gameplay actors, one small class each:
     spawn_emitter.gd      #   SpawnEmitter3D — grabbable cube faucet
@@ -244,7 +244,7 @@ In mixed immersion, visionOS CompositorServices requires **alpha == 0 wherever d
 
 - Engine: [Godot](https://godotengine.org/) — open source
 - visionOS XR port: [Ricardo Sanchez-Saez @ Apple](https://github.com/rsanchezsaez) + community contributors (huisedenanhai, stuartcarnie, BastiaanOlij)
-- **Hand tracking pickup system:** [Marshall Nowak (Nocxr)](https://github.com/Nocxr) — `PickupHandler3D` / `PickupAbleBody3D` from [visionosxr_hand_tracking](https://github.com/Clancey/godot/tree/visionos_master_pr), ported from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
+- **Hand tracking pickup system:** [James Clancey](https://github.com/Clancey) — `PickupHandler3D` / `PickupAbleBody3D` from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
 - Cascade Countdown game + writeup: [Alex Coulombe (@ibrews)](https://github.com/ibrews)
 
 ## License
