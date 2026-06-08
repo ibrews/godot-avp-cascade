@@ -105,6 +105,8 @@ You need:
 - Your Apple Developer Team ID
 - A built `libgodot.a` + matching `Godot.app` editor from **[Clancey/godot](https://github.com/Clancey/godot/tree/visionos_master_pr) `visionos_master_pr` (HEAD `2b2f749`)** for hand tracking — or rsanchezsaez `apple/visionos-xr` if you only want the render-only cascade. See [building-the-engine](#building-the-engine) below. **Build both from the same commit** so the editor that exports the PCK matches the runtime lib.
 
+> 💡 **Prototype in the visionOS Simulator** — far faster to iterate than a device round-trip, and it shows the real spatial render. The **[godot-visionos-simulator-kit](https://github.com/ibrews/godot-visionos-simulator-kit)** gives you a one-command `./build.sh sim | device` switcher plus simulator input + hand-tracking tooling (extracted from this project so any Godot visionOS app can use it). The manual steps below are what it wraps.
+
 ```bash
 # Re-export the PCK from the test-project
 ~/godot-visionos-pilot/Godot.app/Contents/MacOS/Godot --headless \

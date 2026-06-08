@@ -2,6 +2,17 @@
 
 You are working on an Apple Vision Pro Godot pilot. Read this before doing anything.
 
+## ⭐ Prototype in the visionOS Simulator — NOT the desktop Godot build
+
+**Always build/run in the visionOS Simulator to prototype.** It shows the real spatial render and is
+much easier to test than a device round-trip. Do NOT use desktop Godot (`Godot.app --path
+test-project`) as a stand-in — it renders broken XR visuals (audio only). GDScript/PCK changes need no
+engine rebuild: re-export the PCK → `xcodebuild` for `platform=visionOS Simulator` → `xcrun simctl
+install/launch`. Sim UDID: `A540B3B5-CB1D-477D-A3B9-A6D41598B704`; the sim has no hand input, so a round
+auto-starts when `SIMULATOR_DEVICE_NAME` is set. For a one-command sim/device switcher + sim input/hands
+tooling, use **[godot-visionos-simulator-kit](https://github.com/ibrews/godot-visionos-simulator-kit)**.
+Full recipe + gotchas: KB `intelligence/techniques/godot-avp-simulator-input.md`.
+
 ## Read the KB first
 
 The bulk of project knowledge lives in the maintainer's private knowledge base, not in this repo. Before working, read these (paths are within that KB):
@@ -69,7 +80,6 @@ xcrun devicectl device copy from \
 
 - Rebuild the engine (`rsanchezsaez-godot/`) unless a specific upstream change requires it. 30-90 min on M1 Max. The current `libgodot.a` works.
 - Switch to Forward+. It silently renders nothing.
-- Try the visionOS simulator. CompositorServices `.layered` is hardware-only; Metal cube arrays absent in simulator GPU emulation. Hardware-only target.
 - Connect `body_entered` BEFORE `add_child()` on a `RigidBody3D`. First frame's collisions get swallowed.
 - Forget `contact_monitor=true` and `max_contacts_reported≥1` on new `RigidBody3D` instances — silent miss on signals.
 
