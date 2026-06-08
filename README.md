@@ -18,6 +18,8 @@ The first publicly-documented Godot `RigidBody3D` physics scene rendering in imm
 
 > 📖 **New to Godot or visionOS — or just want to see how this was built?** The **[project wiki](https://github.com/ibrews/godot-avp-cascade/wiki)** is a beginner-friendly (ELI5) walkthrough: Godot basics, the hand-tracking pickup, the live-synthesized audio, and the silent-failure gotchas. (This README is the full technical spec.)
 
+> 🧰 **Building your own Godot visionOS app?** The simulator dev tooling from this project — a one-command sim/device build switcher, simulator input, and hand-tracking — is extracted into **[godot-visionos-simulator-kit](https://github.com/ibrews/godot-visionos-simulator-kit)**. It pairs great with Cascade Countdown (that's where it came from) and drops cleanly into any Godot visionOS repo.
+
 ## ▶️ Try it on Apple Vision Pro (TestFlight)
 
 **[Join the public beta → testflight.apple.com/join/bw1aeExJ](https://testflight.apple.com/join/bw1aeExJ)**
