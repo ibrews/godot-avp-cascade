@@ -36,3 +36,6 @@ clancey-godot/
 
 # Compiled sim-input tap (build from tools/SimInputTap.swift)
 tools/siminputtap
+
+# compiled SimHands canned MC sender (build from the .swift)
+/tools/simhands_canned_sender

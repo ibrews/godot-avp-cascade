@@ -48,6 +48,16 @@
 	<string>This app uses hand tracking so you can pinch, grab, and throw cubes.</string>
 	<key>NSWorldSensingUsageDescription</key>
 	<string>This app uses world sensing for spatial tracking.</string>
+	<!-- SIMULATOR-ONLY dev tooling: MultipeerConnectivity bridge for VisionOS-SimHands
+	     hand input in the visionOS Simulator. Harmless on device (the MC client never
+	     starts there — it's TARGET_OS_SIMULATOR + GODOT_SIMHANDS gated). -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connects to the SimHands helper to receive simulated hand tracking when running in the visionOS Simulator (development only).</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_Bonjour._tcp</string>
+		<string>_Bonjour._udp</string>
+	</array>
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UIStatusBarHidden</key>

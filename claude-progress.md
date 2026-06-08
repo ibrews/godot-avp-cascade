@@ -2,6 +2,48 @@
 
 Turning the falling-cascade demo into a proper physics-sandbox sample project for AVP/Godot.
 
+## ✅ STATE (2026-06-07, session 8) — SimHands → XRHandTracker SIM bridge (Option A) FIRST LIGHT — READ FIRST
+
+**RESULT: FIRST LIGHT VERIFIED.** os_log proof (canned MC sender, no webcam): `ENABLED` →
+`client started: advertising + browsing 'Bonjour'` → `found peer 'SimHandsCanned' → connected` →
+`right tracked wrist=(0.00,-0.27,-0.45) thumb-index=0.023m pinch=1` oscillating 0.013↔0.087 m on the
+4 s loop. `/user/hand_tracker/right` carries live joints; pinch crosses the game's `PINCH_START=0.024`.
+MC discovery works **sim↔host** (no local-network prompt blocked it). Plan steps 1–9 ✅; calibration
+(visible cube grab placement, two hands, real webcam, joint orientation) deferred → `REVIEW_NEEDED.md`.
+Device build NOT run (no rebuild needed; device xcframework slice byte-unchanged; backup at
+`/tmp/libgodot.sim.prebridge.backup.a`). Engine committed on clancey `simhands-sim-bridge`; parent repo
+committed. KB `godot-avp-simhands-sim-input.md` marks Option A VERIFIED.
+
+---
+
+## (build notes) SimHands → XRHandTracker SIM bridge (Option A, native engine)
+
+**Goal:** native MultipeerConnectivity client compiled into the **clancey** fork that ingests
+VisionOS-SimHands MediaPipe hand-tracking (21 landmarks/hand over MC, serviceType `"Bonjour"`) and
+writes Godot's `XRHandTracker` so the Cascade game gets grab/pinch in the **visionOS SIMULATOR**.
+Dev/test only — **no-op on device and when `GODOT_SIMHANDS` unset.** Branch:
+`clancey-godot @ simhands-sim-bridge` (off `visionos_master_pr`). Does NOT touch rsanchezsaez, the
+renderer settings, or the device hand path.
+
+**Mechanism (verified from source):**
+- SimHands MC contract: `BonjourSession(.default)` → serviceType **`"Bonjour"`**, `.combined` usage
+  (advertise + browse + auto-invite + auto-accept), data via `MCSession.send(.reliable)`. JSON:
+  `{"landmarks":[[{x,y,z}×21],…],"handednesses":[[{"displayName":"Left"|"Right"}],…]}`. MediaPipe
+  L/R swapped; SimHands swaps back (replicated).
+- Engine write path REUSED verbatim: `process()` → `update_hand_states_from_arkit()` (empty in sim)
+  → **[inject `apply_simhands_hand_states()`]** → `apply_hand_states_to_trackers()`. Bridge only
+  fills `hand_interaction_states[LEFT|RIGHT]`; the existing code writes the trackers.
+- Game (`main_v2.gd`): reads `/user/hand_tracker/{left,right}`, joints 1=wrist, 5=thumb_tip,
+  10=index_tip, 15/20/25 = middle/ring/pinky tip; index pinch begins at 0.024 m.
+
+**Plan:** (1) ✅ read contracts → (2) 🚧 `simhands_bridge.mm` (ObjC MC client + member methods,
+sim-gated) → (3) `.h` members+decls → (4) `.mm` 3 call sites → (5) Info.plist NSBonjourServices +
+NSLocalNetworkUsageDescription → (6) build sim slice → (7) canned MC sender → (8) PCK re-export +
+build/install/launch on booted sim → (9) verify via os_log + screenshot → (10) REVIEW_NEEDED + KB +
+daily. Booted sim: Apple Vision Pro visionOS 26.5 — `A540B3B5-CB1D-477D-A3B9-A6D41598B704`.
+
+---
+
 ## ✅ STATE (2026-06-03) — sample-project polish pass (code/doc cleanup, NO behavior change)
 
 Cleaned the GDScript + README so the repo reads as a clear Godot-on-AVP **sample project**. No
