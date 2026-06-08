@@ -2,6 +2,17 @@
 
 You are working on an Apple Vision Pro Godot pilot. Read this before doing anything.
 
+## ⭐ Prototype in the visionOS Simulator — NOT the desktop Godot build
+
+**Always build/run in the visionOS Simulator to prototype (per Alex).** Do NOT run the project on
+desktop Godot (`Godot.app --path test-project`) as a stand-in — it renders broken XR visuals (audio
+plays but the spatial scene doesn't), so it misleads. The Simulator shows the real render and is much
+easier to test. GDScript/PCK changes need **no engine rebuild** — re-export the PCK, then `xcodebuild`
+for `platform=visionOS Simulator` + `xcrun simctl install/launch`. Sim UDID (Apple Vision Pro):
+`A540B3B5-CB1D-477D-A3B9-A6D41598B704`. The sim has no hand input, so a round auto-starts when
+`SIMULATOR_DEVICE_NAME` is set (bed audible). Full recipe + GUI dev tools: KB
+`intelligence/techniques/godot-avp-simulator-input.md` and `…-simulator-dev-tools.md`.
+
 ## Read the KB first
 
 The bulk of project knowledge lives in the maintainer's private knowledge base, not in this repo. Before working, read these (paths are within that KB):

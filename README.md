@@ -105,6 +105,18 @@ You need:
 - Your Apple Developer Team ID
 - A built `libgodot.a` + matching `Godot.app` editor from **[Clancey/godot](https://github.com/Clancey/godot/tree/visionos_master_pr) `visionos_master_pr` (HEAD `2b2f749`)** for hand tracking — or rsanchezsaez `apple/visionos-xr` if you only want the render-only cascade. See [building-the-engine](#building-the-engine) below. **Build both from the same commit** so the editor that exports the PCK matches the runtime lib.
 
+### The easy way — one command (`build.sh`)
+
+`build.sh` wraps the whole loop (export PCK → `xcodebuild` → install/launch) and switches between the **simulator** and a real **device** — they differ in destination, code-signing, and install tool (`simctl` vs `devicectl`), so this saves you re-typing the incantation:
+
+```bash
+./build.sh sim      # build + run in the visionOS Simulator — fastest to iterate (recommended for prototyping)
+./build.sh device   # build signed + install on a paired Apple Vision Pro
+./build.sh export   # just re-export the Godot .pck
+```
+
+Every project-specific value (device UDID, sim UDID, signing team, bundle id, paths) lives in the **CONFIG block at the top of `build.sh`** — override via env var or a sibling `build.config` — so the script drops cleanly into other Godot visionOS projects. **Prototype in the Simulator** (`./build.sh sim`): it shows the real spatial render and is far quicker to iterate than a device round-trip. Or run the steps by hand:
+
 ```bash
 # Re-export the PCK from the test-project
 ~/godot-visionos-pilot/Godot.app/Contents/MacOS/Godot --headless \
