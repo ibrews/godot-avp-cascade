@@ -159,6 +159,20 @@ For **hand tracking**, build from [Clancey/godot](https://github.com/Clancey/god
 
 The key engine-build gotchas (the `XROrigin3D.current=true` requirement, the mobile-renderer constraint, and the editor/lib version-match rule) are all captured in this README — see [Troubleshooting](#troubleshooting) and [Known limitations](#known-limitations). The engine source tree is `.gitignore`'d here (regenerable from the fork above).
 
+## Simulator dev tools
+
+The visionOS **Simulator** gives a custom-Metal immersive app no working in-app keyboard and no ARKit
+hand anchors, so two host-side helpers drive it (both sim-only; zero effect on device):
+
+- **`tools/SimControlPanel/`** — a macOS SwiftUI window with buttons/toggles/sliders that send
+  commands over UDP `127.0.0.1:9999` (immersion, reset, cycle hands, grab) and stream simulated
+  SimHands hand-tracking over MultipeerConnectivity, with **live hand-placement calibration** sliders.
+  Build with `./tools/SimControlPanel/build.sh`. See [its README](tools/SimControlPanel/README.md).
+- **`tools/SimInputTap.swift`** / **`tools/simhands_canned_sender.swift`** — the original CLI building
+  blocks (global key-tap → UDP; canned MC hand feed) the panel is lifted from.
+
+Background + the calibration architecture: KB `intelligence/techniques/godot-avp-simulator-dev-tools.md`.
+
 ## Real Persona arms (the `upper_limb.txt` toggle)
 
 The **HANDS** button cycles `MESH → BOTH → REAL`. The first two (the virtual GLTF hand mesh) work out of the box. The **REAL** mode — compositing your actual Persona arms over the scene — is controlled by SwiftUI's `.upperLimbVisibility(...)` on the `ImmersiveSpace`, which is **baked at build time** from the `GodotUpperLimbVisibility` key in `Info.plist`. To flip it **live at runtime**, you need a small engine-side change. Without that change the app still runs fine — it just always shows the mesh hands, and the REAL/BOTH modes won't reveal your real arms.

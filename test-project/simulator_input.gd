@@ -17,6 +17,19 @@ extends Node
 
 const SIM_INPUT_PORT := 9999
 
+# Live SimHands-bridge calibration (SimControlPanel dev tool). "K<key><float>" packets tune
+# hand placement/scale while you watch the sim; we persist them to this cfg and the native
+# bridge (simhands_bridge.mm) re-reads it ~9 Hz. "KR" resets (deletes the file → bridge
+# falls back to its compiled first-light defaults). See _handle_calibration.
+const _CALIB_PATH := "user://simhands_calibration.cfg"
+const _CALIB_KEYS := {
+	"S": "hand_scale",  # SIMHANDS_HAND_KNUCKLE_M — self-normalized hand size
+	"P": "plane",       # SIMHANDS_PLANE_M        — x/y travel across the image plane
+	"D": "depth",       # SIMHANDS_DEPTH_M        — wrist distance in front of the origin
+	"Y": "y_offset",    # SIMHANDS_Y_OFFSET_M     — head-relative height (pre floor offset)
+	"Z": "z_gain",      # SIMHANDS_Z_SHAPE_GAIN   — finger-curl depth from MediaPipe z
+}
+
 var _main: Node3D
 var _handler: PickupHandler3D
 var _sim_active := false
@@ -98,6 +111,11 @@ func _process(_delta: float) -> void:
 
 func _handle_cmd(cmd: String) -> void:
 	_diag("rx:" + cmd)
+	# Calibration verbs ("K<key><float>" or "KR") tune the native SimHands bridge LIVE; they
+	# never touch the device path (this whole node is sim-gated). See _handle_calibration.
+	if cmd.length() >= 1 and cmd[0] == "K":
+		_handle_calibration(cmd)
+		return
 	match cmd:
 		"C1":
 			_c_held = true
@@ -115,6 +133,30 @@ func _handle_cmd(cmd: String) -> void:
 			if _main._gesture_cooldown <= 0.0 and _main._gestures_enabled:
 				_main.call("_toggle_immersion")
 				_main._gesture_cooldown = 0.8
+
+# Parse a "K<key><float>" calibration packet and persist it to user://simhands_calibration.cfg
+# (one key per packet; the file accumulates as you touch sliders). "KR" deletes the file so the
+# bridge falls back to its compiled defaults. The bridge only acts on this when GODOT_SIMHANDS
+# is set; on a real headset ARKit drives the hands and none of this runs.
+func _handle_calibration(cmd: String) -> void:
+	var key := cmd.substr(1, 1)
+	if key == "R":
+		_reset_calibration()
+		return
+	if not _CALIB_KEYS.has(key):
+		return
+	var value := cmd.substr(2).to_float()
+	var cf := ConfigFile.new()
+	cf.load(_CALIB_PATH)  # OK if absent — we just add/overwrite this one key
+	cf.set_value("simhands", _CALIB_KEYS[key], value)
+	cf.save(_CALIB_PATH)
+	_diag("calib %s=%f" % [_CALIB_KEYS[key], value])
+
+func _reset_calibration() -> void:
+	var d := DirAccess.open("user://")
+	if d != null and d.file_exists("simhands_calibration.cfg"):
+		d.remove("simhands_calibration.cfg")
+	_diag("calib reset")
 
 # Append-only diagnostic so a headless run can confirm packets arrive. Pull via
 # simctl get_app_container ... data -> Documents/sim_keys.txt.
