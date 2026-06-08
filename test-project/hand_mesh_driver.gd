@@ -23,8 +23,14 @@ var _skeleton: Skeleton3D
 var _mesh_root: Node3D
 var _bone_to_joint: Dictionary = {}  # bone_idx → joint_idx (0-25)
 var _shown := true
+# Simulator: there's no hand-tracking data, so the driver would hide the mesh forever. When
+# true we instead park a static hand mesh in view so it (and the V show/hide) are visible.
+var _sim := false
 
 func _ready() -> void:
+	_sim = OS.has_environment("SIMULATOR_DEVICE_NAME") \
+		or OS.has_environment("SIMULATOR_UDID") \
+		or OS.has_environment("SIMULATOR_ROOT")
 	# Right hand: Y +90°. Left hand (mirrored rig): Y -90°.
 	_bone_correction = Basis(Vector3(0, 1, 0), (-PI / 2.0) if is_left else (PI / 2.0))
 
@@ -124,12 +130,16 @@ func _process(_delta: float) -> void:
 		_mesh_root.visible = false
 		return
 	var tracker := XRServer.get_tracker(tracker_name)
-	if not tracker is XRHandTracker:
-		_mesh_root.visible = false
-		return
 	var ht := tracker as XRHandTracker
-	if not ht.get_has_tracking_data():
-		_mesh_root.visible = false
+	if ht == null or not ht.get_has_tracking_data():
+		# No real hand tracking (always the case in the simulator). On device → hide. In the
+		# sim → park a static hand mesh in front of the camera so the mesh AND the V show/hide
+		# toggle are actually visible. See KB godot-avp-simulator-input.
+		if _sim:
+			_park_in_view()
+			_mesh_root.visible = true
+		else:
+			_mesh_root.visible = false
 		return
 	_mesh_root.visible = true
 
@@ -148,6 +158,21 @@ func _process(_delta: float) -> void:
 		var t := world_to_skel * (origin_x * ht.get_hand_joint_transform(joint_idx))
 		t.basis = t.basis * _bone_correction  # bone-frame correction (per-hand)
 		_skeleton.set_bone_global_pose_override(bone_idx, t, 1.0, false)
+
+# Sim-only: park the (un-articulated) hand mesh at a resting pose in front of the camera so
+# it's visible without hand-tracking data. Position + a roughly palm-toward-user orientation;
+# the GLTF rest pose shows. Tune offsets here if the hands sit too low / close.
+func _park_in_view() -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var ct := cam.global_transform
+	# Lower-FOV, ~0.45 m ahead, one hand each side. Orientation = camera basis (the GLTF rest
+	# pose then reads as open hands in view). VERIFIED visible in the sim; the exact resting
+	# pose is rough (the GLTF rig orientation isn't ideal here) — tune offsets/basis to taste.
+	var side: float = -0.16 if is_left else 0.16
+	var pos: Vector3 = ct.origin + ct.basis.z * -0.45 + ct.basis.y * -0.22 + ct.basis.x * side
+	_mesh_root.global_transform = Transform3D(ct.basis, pos)
 
 # World transform of the XROrigin this hand renders through (tracking→world).
 func _origin_xform() -> Transform3D:

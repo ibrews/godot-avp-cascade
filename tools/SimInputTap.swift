@@ -6,7 +6,7 @@
 // No pip, no extra windows. (The in-app keyboard channel is dead in the sim — see KB
 // godot-avp-simulator-input.md — which is why we tap + UDP.)
 //
-//   C (hold)  grab / poke the panel button under the view centre
+//   C (hold) OR left-click (hold)   grab / poke the panel button under the view centre
 //   V         cycle hands     B   reset sandbox     N   toggle sky / passthrough
 //
 // BUILD:  swiftc -O tools/SimInputTap.swift -o tools/siminputtap
@@ -29,18 +29,28 @@ let keymap: [Int64: (down: String, up: String?)] = [
 ]
 
 let callback: CGEventTapCallBack = { _, type, event, _ in
-    let kc = event.getIntegerValueField(.keyboardEventKeycode)
-    if let m = keymap[kc] {
-        if type == .keyDown {
-            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 { send(m.down) }
-        } else if type == .keyUp, let up = m.up {
-            send(up)
+    switch type {
+    case .leftMouseDown:
+        send("C1")  // left-click = grab (same as holding C) — natural with WASD
+    case .leftMouseUp:
+        send("C0")
+    case .keyDown, .keyUp:
+        let kc = event.getIntegerValueField(.keyboardEventKeycode)
+        if let m = keymap[kc] {
+            if type == .keyDown {
+                if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 { send(m.down) }
+            } else if let up = m.up {
+                send(up)
+            }
         }
+    default:
+        break
     }
-    return Unmanaged.passUnretained(event)  // listen-only: never consume the key
+    return Unmanaged.passUnretained(event)  // listen-only: never consume the event
 }
 
 let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+         | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.leftMouseUp.rawValue)
 guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                   place: .headInsertEventTap,
                                   options: .listenOnly,
