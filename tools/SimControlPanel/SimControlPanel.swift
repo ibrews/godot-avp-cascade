@@ -9,15 +9,21 @@
 //
 //   1. UDP 127.0.0.1:9999  (from tools/SimInputTap.swift)
 //      → test-project/simulator_input.gd, which is sim-gated via OS.has_environment.
-//      Verbs: C1/C0 grab down/up · B reset sandbox · V cycle hands · N toggle immersion.
-//      NEW calibration verbs: "K<key><float>" / "KR" (reset) — see SimController.sendCalib.
-//      Loopback needs no Local Network permission.
+//      Verbs: C1/C0 grab latch down/up · B full scene reset · V cycle hands · N toggle immersion ·
+//      N1/N0 set immersion immersive/mixed · G<x>,<y>,<z>/GR head-tracking · H0/H1/H2 hand source ·
+//      K<key><float>/KR hand calibration. Loopback needs no Local Network permission.
 //
 //   2. MultipeerConnectivity, serviceType "Bonjour"  (from tools/simhands_canned_sender.swift)
 //      → modules/visionos_xr/simhands_bridge.mm (clancey fork), which feeds the stream into
 //      XRHandTracker when launched with GODOT_SIMHANDS=1. Same MC contract as VisionOS-SimHands'
 //      BonjourSession, so if this connects, the real webcam helper will too. We send the same
-//      21-landmark JSON, but with MANUAL pinch (panel-driven) instead of the canned sine loop.
+//      21-landmark JSON, with MANUAL pinch (momentary / loop) and a selectable driven hand.
+//
+// HAND SOURCE PICKER (Off / Canned / Webcam): the bridge auto-connects to every "Bonjour" peer, so
+// to keep the real webcam helper, this panel, and the canned sender from fighting, the picker (a) sends
+// a UDP "H" verb on 9999 so the bridge locks to one source, and (b) starts/stops THIS panel's own
+// canned feed — "Canned" streams it, "Webcam"/"Off" stop it so the panel yields to the real helper.
+// So every tool can stay connected at once while exactly one source drives the trackers.
 //
 // Calibration (hand placement Y / depth / scale, etc.) is applied in the BRIDGE, not here:
 // the bridge self-normalizes hand size (shape_scale = KNUCKLE / measured-span), so perturbing
@@ -54,7 +60,8 @@ final class UDPSender {
 
 /// Native MultipeerConnectivity peer that advertises + browses the "Bonjour" service and
 /// streams 21-landmark MediaPipe hand JSON at 30 Hz, exactly like simhands_canned_sender.swift
-/// — except the pinch is driven on demand by the panel (open ⇄ pinch) instead of a sine loop.
+/// — except the pinch is driven on demand by the panel (momentary tap / continuous loop) and the
+/// driven Godot hand (left/right) is selectable.
 final class SimHandsFeed: NSObject, MCSessionDelegate,
                           MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBrowserDelegate {
     private let serviceType = "Bonjour"
@@ -65,9 +72,17 @@ final class SimHandsFeed: NSObject, MCSessionDelegate,
     private var timer: DispatchSourceTimer?
     private let q = DispatchQueue(label: "com.agilelens.simcontrolpanel.feed")
 
-    /// 0 = open hand, 1 = full pinch. Set from the UI; eased toward each tick for a natural close.
+    /// 0 = open hand, 1 = full pinch. Eased toward each tick for a natural close.
     var pinchTarget: Double = 0
     private var pinch: Double = 0
+    /// Continuously cycle open⇄pinch (panel "Loop" checkbox). Owns pinchTarget while on.
+    var loopPinch = false
+    /// Which Godot hand the feed drives. false → send displayName "Left" → Godot RIGHT (the default);
+    /// true → send "Right" → Godot LEFT, with the landmark x mirrored so it reads as a left hand.
+    var feedHandIsLeft = false
+
+    private var tickCount = 0
+    private var releaseAtTick: Int? = nil   // momentary pinch: auto-release at this tick
 
     /// Called (on main) whenever the connected-peer set changes.
     var onPeersChanged: (([String]) -> Void)?
@@ -115,11 +130,30 @@ final class SimHandsFeed: NSObject, MCSessionDelegate,
         advertiser.stopAdvertisingPeer()
         browser.stopBrowsingForPeers()
         session.disconnect()
-        pinch = 0; pinchTarget = 0
+        pinch = 0; pinchTarget = 0; loopPinch = false; releaseAtTick = nil
         notifyPeers()
     }
 
+    /// Momentary single pinch + release. Closes now, auto-opens after ~0.27 s (on the feed queue so
+    /// it composes with the tick loop). No-op feel if looping is on (loop owns the target).
+    func pinchOnce() {
+        q.async { [weak self] in
+            guard let self else { return }
+            self.pinchTarget = 1.0
+            self.releaseAtTick = self.tickCount + 8   // ~0.27 s @ 30 Hz
+        }
+    }
+
     private func tick() {
+        tickCount += 1
+        if loopPinch {
+            // ~1.2 s cycle: pinch for the first half, release for the second.
+            pinchTarget = (tickCount % 36 < 18) ? 1.0 : 0.0
+            releaseAtTick = nil
+        } else if let r = releaseAtTick, tickCount >= r {
+            pinchTarget = 0.0
+            releaseAtTick = nil
+        }
         pinch += (pinchTarget - pinch) * 0.25      // ~0.1 s ease toward the target
         let data = buildJSON(pinch)
         let peers = session.connectedPeers
@@ -128,20 +162,23 @@ final class SimHandsFeed: NSObject, MCSessionDelegate,
     }
 
     private func buildJSON(_ t: Double) -> Data {
+        let mirror = feedHandIsLeft
+        // displayName "Left" → bridge → Godot RIGHT; "Right" → Godot LEFT (the bridge replicates
+        // SimHands' L/R swap). Mirror x for the left hand so the shape reads as a left hand, not a
+        // right hand on the left tracker (the bridge's chirality flip handles the rig mirror).
+        let displayName = mirror ? "Right" : "Left"
         var joints: [[String: Double]] = []
         joints.reserveCapacity(21)
         for i in 0..<21 {
             let o = openHand[i], p = pinchedHand[i]
-            joints.append([
-                "x": o.0 * (1.0 - t) + p.0 * t,
-                "y": o.1 * (1.0 - t) + p.1 * t,
-                "z": 0.0,
-            ])
+            var x = o.0 * (1.0 - t) + p.0 * t
+            let y = o.1 * (1.0 - t) + p.1 * t
+            if mirror { x = 1.0 - x }
+            joints.append(["x": x, "y": y, "z": 0.0])
         }
-        // displayName "Left" → the bridge replicates SimHands' L/R swap → Godot RIGHT hand.
         let root: [String: Any] = [
             "landmarks": [joints],
-            "handednesses": [[["displayName": "Left", "index": 0, "score": 1.0]]],
+            "handednesses": [[["displayName": displayName, "index": 0, "score": 1.0]]],
         ]
         return (try? JSONSerialization.data(withJSONObject: root)) ?? Data()
     }
@@ -176,6 +213,32 @@ final class SimHandsFeed: NSObject, MCSessionDelegate,
     }
 }
 
+// MARK: - Hand source + driven-hand selection
+
+/// Which feed the SimHands bridge should let drive the trackers. The bridge auto-connects to EVERY
+/// "Bonjour" peer (real webcam helper, this panel's canned feed, the canned-sender CLI), so without a
+/// single-source rule their frames fight. The panel sends the matching UDP "H" verb
+/// (→ simulator_input.gd → user://simhands_calibration.cfg → bridge) AND starts/stops its OWN canned
+/// feed so it yields to the real helper in .webcam/.off. Raw value = the bridge's SimHandsSource int.
+enum HandSource: Int, CaseIterable, Identifiable {
+    case off = 0, canned = 1, webcam = 2
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .canned: return "Canned"
+        case .webcam: return "Webcam"
+        }
+    }
+}
+
+/// Which Godot hand the panel's canned feed drives. The canned table is one hand at a time.
+enum FeedHand: Int, CaseIterable, Identifiable {
+    case left = 0, right = 1
+    var id: Int { rawValue }
+    var label: String { self == .left ? "Left" : "Right" }
+}
+
 // MARK: - Controller (all UI state + both channels)
 
 @MainActor @Observable
@@ -183,9 +246,18 @@ final class SimController {
     private let udp = UDPSender()
     private let feed = SimHandsFeed()
 
-    var feedOn = false
-    var pinching = false
+    var handSource: HandSource = .off
+    var feedHand: FeedHand = .right       // canned feed drives Godot RIGHT by default (legacy behavior)
+    var pinchLooping = false
+    var grabLatched = false               // #3: Grab is a latching toggle, not a hold
+    var immersive = true                  // #1: seeded to the launch default (main_v2 boots immersive)
     var connectedPeers: [String] = []
+
+    // Head-tracking prototype (#7). The pad + z slider drive a fake head position (normalized -1..1);
+    // simulator_input.gd maps it to an XROrigin offset (smoothed, clamped, hand-scale-multiplied).
+    var headTracking = false
+    var headKnob: CGPoint = .zero         // pad position, -1..1 (y up); bound to the HeadPad
+    var headZ: Double = 0                 // forward/back, -1..1
 
     // Calibration — defaults MIRROR simhands_bridge.mm SIMHANDS_DEF_* (keep in sync).
     var handScale = 0.09    // KS  SIMHANDS_HAND_KNUCKLE_M  (self-normalized hand size, m)
@@ -193,7 +265,7 @@ final class SimController {
     var depth     = 0.45    // KD  SIMHANDS_DEPTH_M         (wrist distance in front of origin)
     var yOffset   = -0.10   // KY  SIMHANDS_Y_OFFSET_M      (head-relative height, pre floor offset)
     var zGain     = 1.0     // KZ  SIMHANDS_Z_SHAPE_GAIN    (finger-curl depth from MediaPipe z)
-    var smoothing = 0.9     // KM  SIMHANDS_SMOOTHING       (hand stabilizer 0=raw .. 1=max)
+    var smoothing = 0.9     // KM  SIMHANDS_SMOOTHING       (0=raw .. 1=heavy .. 3=glassy promo capture)
 
     private var lastSent: [String: Date] = [:]
 
@@ -203,25 +275,85 @@ final class SimController {
         }
     }
 
-    // One-shot scene commands (UDP → simulator_input.gd → main_v2.gd).
-    func toggleImmersion() { udp.send("N") }
-    func resetSandbox()    { udp.send("B") }
-    func cycleHands()      { udp.send("V") }
+    // --- Scene (UDP → simulator_input.gd → main_v2.gd) ---
 
-    // Grab: press-and-hold → C1 (down) / C0 (up), same as SimInputTap's C/left-click.
-    func setGrab(_ on: Bool) { udp.send(on ? "C1" : "C0") }
+    /// Explicit immersion set (#1): N1 = immersive (opaque sky), N0 = mixed (passthrough). The panel is
+    /// the only immersion controller in the sim, so it stays authoritative and labels the state.
+    func setImmersion(_ on: Bool) {
+        immersive = on
+        udp.send(on ? "N1" : "N0")
+    }
+    func cycleHands() { udp.send("V") }
+    /// Full scene reset (#2): simulator_input.gd's "B" now also restarts the round (fresh cascade).
+    func resetSandbox() { udp.send("B") }
 
-    // SimHands canned feed on/off (this app becomes the MC peer the bridge connects to).
-    func setFeed(_ on: Bool) {
-        feedOn = on
-        if on { feed.start() } else { feed.stop(); connectedPeers = [] }
+    /// Grab (#3): a LATCHING toggle. Click once → hold the grab (C1); if it latched onto an object you
+    /// keep holding it (rigid-to-head, even while WASD-driving) until you click again to release (C0).
+    func toggleGrab() {
+        grabLatched.toggle()
+        udp.send(grabLatched ? "C1" : "C0")
     }
 
-    // Simulate pinch: drives the feed's open⇄pinch interpolation (real MC data → real pinch).
-    func setPinch(_ on: Bool) {
-        pinching = on
-        feed.pinchTarget = on ? 1.0 : 0.0
+    // --- Hand source + driven hand ---
+
+    /// Select which feed drives the SimHands bridge. Sends the UDP "H" verb so the bridge restricts
+    /// itself to that source, AND starts/stops THIS app's canned feed so it yields to the real webcam
+    /// helper in .webcam/.off — every feed can stay connected while only the selected one drives.
+    func setHandSource(_ src: HandSource) {
+        handSource = src
+        udp.send("H\(src.rawValue)")            // → simulator_input.gd → cfg → bridge forced source
+        if src == .canned {
+            feed.start()                         // advertise + stream our canned hand
+        } else {
+            setPinchLoop(false)                  // pinch/loop only apply to our own canned feed
+            feed.stop()                          // yield: stop advertising/sending → helper takes over
+            connectedPeers = []
+        }
     }
+
+    /// Which Godot hand the canned feed drives (#4). Effective immediately on the next feed tick.
+    func setFeedHand(_ hand: FeedHand) {
+        feedHand = hand
+        feed.feedHandIsLeft = (hand == .left)
+    }
+
+    // --- Pinch (canned feed) ---
+
+    /// Momentary single pinch + release (#3).
+    func pinchOnce() { feed.pinchOnce() }
+
+    /// Continuous pinch/release loop (#3). Off also forces the hand open.
+    func setPinchLoop(_ on: Bool) {
+        pinchLooping = on
+        feed.loopPinch = on
+        if !on { feed.pinchTarget = 0 }
+    }
+
+    // --- Head tracking (#7) ---
+
+    func setHeadTracking(_ on: Bool) {
+        headTracking = on
+        if on {
+            sendHead()                           // engage at the current pad position
+        } else {
+            headKnob = .zero; headZ = 0
+            udp.send("GR")                       // disengage + recenter the viewpoint
+        }
+    }
+    func recenterHead() {
+        headKnob = .zero; headZ = 0
+        udp.send("GR")
+    }
+    /// Emit the current fake head position. Throttled like the calibration sliders.
+    func sendHead(force: Bool = false) {
+        guard headTracking else { return }
+        let now = Date()
+        if !force, let t = lastSent["G"], now.timeIntervalSince(t) < 0.03 { return }
+        lastSent["G"] = now
+        udp.send(String(format: "G%.3f,%.3f,%.3f", headKnob.x, headKnob.y, headZ))
+    }
+
+    // --- Calibration ---
 
     /// Send one calibration verb. Throttled per key (≥40 ms) so a slider drag doesn't storm
     /// the cfg writer; pass force on drag-end to guarantee the final value lands.
@@ -232,7 +364,7 @@ final class SimController {
         udp.send("K" + key + String(format: "%.4f", value))
     }
 
-    /// Re-assert all five sliders (useful right after launch to sync the cfg to this panel).
+    /// Re-assert all sliders (useful right after launch to sync the cfg to this panel).
     func pushAllCalib() {
         sendCalib("S", handScale, force: true)
         sendCalib("P", plane, force: true)
@@ -246,34 +378,11 @@ final class SimController {
     func resetCalib() {
         handScale = 0.09; plane = 0.55; depth = 0.45; yOffset = -0.10; zGain = 1.0; smoothing = 0.9
         udp.send("KR")
+        udp.send("H\(handSource.rawValue)")  // KR deletes the cfg (→ source AUTO) — re-assert the pick
     }
 }
 
 // MARK: - Reusable controls
-
-/// A button that reports press (true) and release (false) — for grab and pinch holds.
-private struct HoldButton: View {
-    let title: String
-    let systemImage: String
-    let onChange: (Bool) -> Void
-    @State private var down = false
-
-    var body: some View {
-        Label(title, systemImage: systemImage)
-            .font(.system(size: 13, weight: .semibold))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .background(down ? Color.accentColor : Color(nsColor: .controlColor))
-            .foregroundStyle(down ? Color.white : Color.primary)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in if !down { down = true; onChange(true) } }
-                    .onEnded { _ in down = false; onChange(false) }
-            )
-    }
-}
 
 private struct CalibSlider: View {
     let title: String
@@ -298,97 +407,263 @@ private struct CalibSlider: View {
     }
 }
 
+/// A 2D drag pad emitting a normalized position in [-1,1]² (y up). Drives the fake head signal (#7).
+private struct HeadPad: View {
+    let enabled: Bool
+    @Binding var pos: CGPoint
+    let onMove: () -> Void
+    private let side: CGFloat = 128
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.4)))
+            Rectangle().fill(.secondary.opacity(0.25)).frame(width: 1, height: side)
+            Rectangle().fill(.secondary.opacity(0.25)).frame(width: side, height: 1)
+            Circle()
+                .fill(enabled ? Color.accentColor : Color.secondary)
+                .frame(width: 18, height: 18)
+                .offset(x: pos.x * (side / 2 - 9), y: -pos.y * (side / 2 - 9))
+        }
+        .frame(width: side, height: side)
+        .contentShape(Rectangle())
+        .opacity(enabled ? 1 : 0.4)
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    guard enabled else { return }
+                    let nx = max(-1, min(1, Double((v.location.x - side / 2) / (side / 2))))
+                    let ny = max(-1, min(1, Double(-(v.location.y - side / 2) / (side / 2))))
+                    pos = CGPoint(x: nx, y: ny)
+                    onMove()
+                }
+        )
+        .disabled(!enabled)
+    }
+}
+
 // MARK: - Main view
 
 struct ContentView: View {
     @State private var c = SimController()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                sceneGroup
+                grabGroup
+                sourceGroup
+                calibrationGroup
+                headGroup
+                footer
+            }
+            .padding(16)
+            .frame(width: 360)
+        }
+        // Resizable + scrollable: ideal height fits a laptop screen (head pad clear of the dock);
+        // the ScrollView reaches everything when shorter, and Alex can drag it taller.
+        .frame(minWidth: 360, idealWidth: 360, maxWidth: 360,
+               minHeight: 460, idealHeight: 740, maxHeight: .infinity)
+    }
 
-            GroupBox("Scene") {
-                VStack(spacing: 8) {
-                    HStack(spacing: 8) {
-                        Button { c.toggleImmersion() } label: {
-                            Label("Immersion", systemImage: "cube.transparent").frame(maxWidth: .infinity)
-                        }
-                        Button { c.cycleHands() } label: {
-                            Label("Hands", systemImage: "hand.raised").frame(maxWidth: .infinity)
-                        }
-                        Button { c.resetSandbox() } label: {
-                            Label("Reset", systemImage: "arrow.counterclockwise").frame(maxWidth: .infinity)
-                        }
+    // MARK: Scene
+
+    private var sceneGroup: some View {
+        GroupBox("Scene") {
+            VStack(spacing: 8) {
+                // #1: immersion shows + sets the actual state (panel is authoritative via N0/N1).
+                Picker("View mode", selection: Binding(get: { c.immersive }, set: { c.setImmersion($0) })) {
+                    Text("Mixed").tag(false)
+                    Text("Immersive").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                HStack(spacing: 8) {
+                    Button { c.cycleHands() } label: {
+                        Label("Hands", systemImage: "hand.raised").frame(maxWidth: .infinity)
+                    }
+                    Button { c.resetSandbox() } label: {
+                        Label("Reset", systemImage: "arrow.counterclockwise").frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(6)
+        }
+    }
+
+    // MARK: Grab
+
+    private var grabGroup: some View {
+        GroupBox("Grab") {
+            VStack(alignment: .leading, spacing: 6) {
+                Button { c.toggleGrab() } label: {
+                    Label(c.grabLatched ? "Holding — click to release" : "Grab",
+                          systemImage: c.grabLatched ? "hand.raised.fill" : "hand.raised.app")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+                        .background(c.grabLatched ? Color.accentColor : Color(nsColor: .controlColor))
+                        .foregroundStyle(c.grabLatched ? Color.white : Color.primary)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Text("Latching toggle — reach an object at the view centre, click to hold it (carries with the head while you WASD-drive), click again to release.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(6)
+        }
+    }
+
+    // MARK: Hand source
+
+    private var sourceGroup: some View {
+        GroupBox("Hand source (MultipeerConnectivity)") {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Hand source",
+                       selection: Binding(get: { c.handSource }, set: { c.setHandSource($0) })) {
+                    ForEach(HandSource.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                Text(sourceHelp)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // #4: which Godot hand the canned feed drives.
+                HStack {
+                    Text("Drives").font(.caption).foregroundStyle(.secondary)
+                    Picker("Drives", selection: Binding(get: { c.feedHand }, set: { c.setFeedHand($0) })) {
+                        ForEach(FeedHand.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+                    .disabled(c.handSource != .canned)
+                    .opacity(c.handSource == .canned ? 1 : 0.4)
+                }
+
+                // #3: momentary pinch + loop checkbox (canned feed only).
+                HStack(spacing: 8) {
+                    Button { c.pinchOnce() } label: {
+                        Label("Pinch", systemImage: "hand.pinch").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    HoldButton(title: "Grab (hold)", systemImage: "hand.pinch") { c.setGrab($0) }
+                    .disabled(c.handSource != .canned || c.pinchLooping)
+                    Toggle(isOn: Binding(get: { c.pinchLooping }, set: { c.setPinchLoop($0) })) {
+                        Text("Loop")
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(c.handSource != .canned)
                 }
-                .padding(6)
-            }
+                .opacity(c.handSource == .canned ? 1 : 0.4)
 
-            GroupBox("SimHands feed (MultipeerConnectivity)") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle(isOn: Binding(get: { c.feedOn }, set: { c.setFeed($0) })) {
-                        Text("Stream canned hand → bridge")
-                    }
-                    HoldButton(title: "Simulate pinch (hold)", systemImage: "hand.pinch.fill") { c.setPinch($0) }
-                        .disabled(!c.feedOn).opacity(c.feedOn ? 1 : 0.4)
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(c.connectedPeers.isEmpty ? Color.secondary : Color.green)
-                            .frame(width: 8, height: 8)
-                        Text(c.feedOn
-                             ? (c.connectedPeers.isEmpty ? "advertising — waiting for sim…"
-                                                         : "connected: \(c.connectedPeers.joined(separator: ", "))")
-                             : "feed off")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
+                HStack(spacing: 6) {
+                    Circle().fill(statusColor).frame(width: 8, height: 8)
+                    Text(statusText)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-                .padding(6)
             }
-
-            GroupBox("Hand calibration (live → bridge)") {
-                VStack(alignment: .leading, spacing: 7) {
-                    CalibSlider(title: "Y offset (m)", key: "Y", value: $c.yOffset,
-                                range: -1.0...2.0, send: send)
-                    CalibSlider(title: "Depth (m)", key: "D", value: $c.depth,
-                                range: 0.15...1.0, send: send)
-                    CalibSlider(title: "Hand scale (m)", key: "S", value: $c.handScale,
-                                range: 0.04...0.18, send: send)
-                    CalibSlider(title: "Smoothing", key: "M", value: $c.smoothing,
-                                range: 0.0...1.0, send: send)
-                    DisclosureGroup("Advanced") {
-                        VStack(alignment: .leading, spacing: 7) {
-                            CalibSlider(title: "Plane (m)", key: "P", value: $c.plane,
-                                        range: 0.2...1.2, send: send)
-                            CalibSlider(title: "Z gain", key: "Z", value: $c.zGain,
-                                        range: 0.0...3.0, send: send)
-                        }
-                        .padding(.top, 4)
-                    }
-                    .font(.caption)
-                    HStack(spacing: 8) {
-                        Button { c.pushAllCalib() } label: {
-                            Label("Apply all", systemImage: "arrow.up.circle").frame(maxWidth: .infinity)
-                        }
-                        Button { c.resetCalib() } label: {
-                            Label("Reset", systemImage: "arrow.uturn.backward").frame(maxWidth: .infinity)
-                        }
-                    }
-                    .buttonStyle(.bordered).controlSize(.small)
-                }
-                .padding(6)
-            }
-
-            footer
+            .padding(6)
         }
-        .padding(16)
-        .frame(width: 360)
+    }
+
+    // MARK: Calibration
+
+    private var calibrationGroup: some View {
+        GroupBox("Hand calibration (live → bridge)") {
+            VStack(alignment: .leading, spacing: 7) {
+                CalibSlider(title: "Y offset (m)", key: "Y", value: $c.yOffset,
+                            range: -1.0...2.0, send: send)
+                CalibSlider(title: "Depth (m)", key: "D", value: $c.depth,
+                            range: 0.15...1.0, send: send)
+                CalibSlider(title: "Hand scale (m) → size + travel", key: "S", value: $c.handScale,
+                            range: 0.04...0.18, send: send)
+                CalibSlider(title: "Smoothing (0 raw · 1 heavy · 3 glassy)", key: "M", value: $c.smoothing,
+                            range: 0.0...3.0, send: send)
+                DisclosureGroup("Advanced") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        CalibSlider(title: "Plane (m)", key: "P", value: $c.plane,
+                                    range: 0.2...1.2, send: send)
+                        CalibSlider(title: "Z gain", key: "Z", value: $c.zGain,
+                                    range: 0.0...3.0, send: send)
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.caption)
+                HStack(spacing: 8) {
+                    Button { c.pushAllCalib() } label: {
+                        Label("Apply all", systemImage: "arrow.up.circle").frame(maxWidth: .infinity)
+                    }
+                    Button { c.resetCalib() } label: {
+                        Label("Reset", systemImage: "arrow.uturn.backward").frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+            }
+            .padding(6)
+        }
+    }
+
+    // MARK: Head tracking (#7)
+
+    private var headGroup: some View {
+        GroupBox("Head tracking (sim · prototype)") {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(isOn: Binding(get: { c.headTracking }, set: { c.setHeadTracking($0) })) {
+                    Text("Move the viewpoint with a fake head signal")
+                }
+                HStack(alignment: .top, spacing: 12) {
+                    HeadPad(enabled: c.headTracking, pos: $c.headKnob) { c.sendHead() }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Forward / back").font(.caption).foregroundStyle(.secondary)
+                        Slider(value: Binding(get: { c.headZ }, set: { c.headZ = $0; c.sendHead() }),
+                               in: -1.0...1.0)
+                            .controlSize(.small)
+                            .disabled(!c.headTracking)
+                        Button { c.recenterHead() } label: {
+                            Label("Recenter", systemImage: "scope").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .disabled(!c.headTracking)
+                        Text("Prototype: drag the pad to move your head; travel scales with Hand scale. Webcam face detection feeds the same path later.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(6)
+        }
     }
 
     // sendCalib bound for CalibSlider's closure (carries the force flag through).
     private func send(_ key: String, _ value: Double, _ force: Bool) {
         c.sendCalib(key, value, force: force)
+    }
+
+    // Hand-source picker help + connection status (reflects THIS panel's canned feed; in .webcam/.off
+    // the panel feed is stopped so the real helper — or nothing — drives via the bridge's lock).
+    private var sourceHelp: String {
+        switch c.handSource {
+        case .off: return "Hands hidden — the bridge ignores every feed."
+        case .canned: return "This panel streams a canned hand. Use Pinch / Loop."
+        case .webcam: return "Yields to the real VisionOS-SimHands webcam helper."
+        }
+    }
+    private var statusColor: Color {
+        switch c.handSource {
+        case .off: return .secondary
+        case .canned: return c.connectedPeers.isEmpty ? .orange : .green
+        case .webcam: return .blue
+        }
+    }
+    private var statusText: String {
+        switch c.handSource {
+        case .off: return "hands off"
+        case .canned: return c.connectedPeers.isEmpty
+            ? "advertising — waiting for sim…"
+            : "driving \(c.feedHand.label): \(c.connectedPeers.joined(separator: ", "))"
+        case .webcam: return "yielded to webcam helper"
+        }
     }
 
     private var header: some View {
@@ -413,6 +688,6 @@ struct SimControlPanelApp: App {
         WindowGroup("Godot Sim Control Panel") {
             ContentView()
         }
-        .windowResizability(.contentSize)
+        .windowResizability(.contentMinSize)
     }
 }

@@ -18,23 +18,32 @@ Two output channels, both reusing existing, proven transports:
 
 | Channel | Target | What it carries |
 |---|---|---|
-| **UDP `127.0.0.1:9999`** (loopback, no permission) | `test-project/simulator_input.gd` (sim-gated) | `N` immersion · `B` reset · `V` cycle hands · `C1`/`C0` grab down/up · **`K*` calibration** |
-| **MultipeerConnectivity, service `"Bonjour"`** | `simhands_bridge.mm` (clancey fork, `GODOT_SIMHANDS=1`) | 21-landmark MediaPipe hand JSON @ 30 Hz, with panel-driven pinch |
+| **UDP `127.0.0.1:9999`** (loopback, no permission) | `test-project/simulator_input.gd` (sim-gated) | `N1`/`N0` set immersion · `B` full reset · `V` cycle hands · `C1`/`C0` grab latch · `G`/`GR` head-track · `H0`/`H1`/`H2` hand source · **`K*` calibration** |
+| **MultipeerConnectivity, service `"Bonjour"`** | `simhands_bridge.mm` (clancey fork, `GODOT_SIMHANDS=1`) | 21-landmark MediaPipe hand JSON @ 30 Hz, with panel-driven pinch + selectable driven hand (L/R) |
 
 ### UDP protocol (extends the existing single-char protocol)
 
 ```
-C1 / C0   grab down / up           N   toggle immersion / passthrough
-B         reset sandbox            V   cycle hands (mesh / both / real)
+C1 / C0   grab latch down / up     N         toggle immersion (legacy)
+B         full scene reset         N1 / N0   set immersion immersive / mixed
+V         cycle hands              H0/H1/H2  hand source off / canned / webcam
+G<x>,<y>,<z>  fake head position   GR        head-track recenter / disengage
 
 K<key><float>   set a SimHands-bridge calibration value (persisted to user://simhands_calibration.cfg)
-   KS<f>  hand_scale  (SIMHANDS_HAND_KNUCKLE_M, m — self-normalized hand size)
+   KS<f>  hand_scale  (SIMHANDS_HAND_KNUCKLE_M, m — self-normalized hand size; also scales travel)
    KP<f>  plane       (SIMHANDS_PLANE_M, m — x/y travel across the image plane)
    KD<f>  depth       (SIMHANDS_DEPTH_M, m — wrist distance in front of the origin)
    KY<f>  y_offset    (SIMHANDS_Y_OFFSET_M, m — head-relative height, pre floor offset)
    KZ<f>  z_gain      (SIMHANDS_Z_SHAPE_GAIN — finger-curl depth from MediaPipe z)
+   KM<f>  smoothing   (SIMHANDS_SMOOTHING — 0 raw · 1 heavy · up to 3 glassy/promo)
 KR        reset calibration to compiled defaults (deletes the cfg)
 ```
+`N1`/`N0` set immersion explicitly so the panel stays authoritative and can label the state
+Immersive/Mixed. `G`/`GR` drive a **prototype** head-tracking path: a fake head position (panel
+pad, later webcam face detection) moves the `XROrigin` so the viewpoint travels with the head — its
+travel scales with `KS` (hand scale), same as the hands. `H0/H1/H2` pick which `"Bonjour"` feed the
+bridge lets drive, so the panel, the canned sender, and the real webcam helper can all stay
+connected while only one drives.
 
 ### Why calibration goes through the bridge (not the sender or GDScript)
 
@@ -59,29 +68,36 @@ SIM=A540B3B5-CB1D-477D-A3B9-A6D41598B704
 SIMCTL_CHILD_GODOT_SIMHANDS=1 xcrun simctl launch --terminate-running-process \
   "$SIM" com.agilelens.godotvisionpilot
 
-# 3. In the panel: flip "Stream canned hand → bridge" ON, then tune the sliders.
+# 3. In the panel: set Hand source ▸ Canned, then tune the sliders.
 ```
 
 > The `K*` calibration verbs only do anything when the app is launched with `GODOT_SIMHANDS=1`
 > (the native bridge active). The `N/B/V/C` verbs work in any simulator run.
 >
-> If you also run `tools/simhands_canned_sender` (the CLI feed), stop it before using the panel's
-> feed — otherwise both advertise `"Bonjour"` and the bridge gets two streams.
+> Use the **Hand source** picker (Off / Canned / Webcam) to choose which `"Bonjour"` feed drives:
+> Canned streams this panel's hand; Webcam/Off stop it so the real VisionOS-SimHands helper takes
+> over. Every feed can stay connected at once — only the selected source drives.
 
 ## Things to Try
 
-1. **Move the immersive scene to passthrough.** Click **Scene ▸ Immersion** — the Godot scene
-   toggles between mixed (passthrough) and full immersion (`N`).
-2. **Reset the cascade.** Click **Scene ▸ Reset** to rebuild the sandbox (`B`), and **Hands** to
-   cycle the hand visualization mode mesh → both → real (`V`).
-3. **Drive a hand into the scene.** Flip **SimHands feed** ON; watch the panel's status dot go
-   green ("connected: GodotVisionPilot"). Hold **Simulate pinch** to close the canned hand's
-   index→thumb across the grab threshold.
-4. **Lift the hands to eye level.** Drag **Y offset** up to ~`+1.5`. If the canned hand was
-   sitting at the floor (STAGE play-area, no roomscale offset), this raises it to in front of
-   your face. Drag **Depth** to push it nearer/farther.
-5. **Resize the hand, then reset.** Drag **Hand scale** and watch the bridge's `thumb-index`
-   distance change in the os_log; click **Reset** to drop back to first-light defaults.
+1. **Flip immersion and read the state.** Use **Scene ▸ Mixed / Immersive** — the segmented
+   control both sets the Godot scene (`N1`/`N0`) and shows which mode is active. **Reset** does a
+   full cascade reset (clears cubes, recenters, restarts the round); **Hands** cycles the hand
+   visualization mesh → both → real.
+2. **Latch a grab and drive away.** Click **Grab** once to hold (it stays latched — the button
+   reads "Holding"); if you reached an object at the view centre it rides the head while you
+   WASD-drive the sim. Click **Grab** again to release.
+3. **Drive a canned hand + pinch it.** Set **Hand source ▸ Canned** (status dot goes green), pick
+   which hand it **Drives** (Left / Right), then tap **Pinch** for a single pinch+release or check
+   **Loop** to cycle continuously across the grab threshold.
+4. **Dial in placement, scale, and travel.** Drag **Y offset** up to ~`+1.5` to lift the hand to
+   eye level and **Depth** to push it nearer/farther. Drag **Hand scale** up — the hand grows AND
+   travels farther for the same motion (2× scale ≈ 2× travel). Push **Smoothing** toward `3` for a
+   glassy, slow glide (promo capture); **Reset** drops calibration back to first-light defaults.
+5. **Prototype head-tracking.** Enable **Head tracking**, drag the pad to "move your head" and the
+   **Forward / back** slider to lean — the viewpoint (`XROrigin`) travels with it, scaled by Hand
+   scale. **Recenter** snaps back. (This is the fake-signal prototype; webcam face detection feeds
+   the same path later.)
 
 To watch the bridge react:
 ```sh

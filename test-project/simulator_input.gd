@@ -45,6 +45,18 @@ var _c_held := false
 var _was_holding := false
 var _grab_cam_offset := Transform3D.IDENTITY
 
+# Head-tracking prototype (#7): a fake (panel head-pad) or, later, webcam face signal moves the
+# XROrigin so the rendered viewpoint travels with the head — same mechanism as WASD nav and the hand
+# WASD-follow (move the XROrigin, NOT the native head_tracker; the sim head pose doesn't match the
+# rendered camera — that's the view-anchoring dead-end). Position-only, eased + clamped, sim-only.
+var _xr_origin: Node3D
+var _head_active := false
+var _head_target := Vector3.ZERO     # latest commanded offset (m), already scaled + clamped
+var _head_smoothed := Vector3.ZERO   # per-frame eased offset actually applied to the origin
+const _HEAD_BASE_M := 0.5            # origin travel at full pad deflection, before the hand-scale mult
+const _HEAD_MAX_M := 1.5             # hard per-axis clamp so the viewpoint can't fly off
+const _HEAD_SMOOTH_RATE := 12.0      # exponential-approach rate (× delta → ease alpha)
+
 func _ready() -> void:
 	_main = get_parent()
 	# Simulator-only (bulletproof: these env vars exist only in the sim process, never device).
@@ -54,6 +66,7 @@ func _ready() -> void:
 	if not _sim_active:
 		return
 	_handler = _main._hand_handlers.get("right_hand") as PickupHandler3D
+	_xr_origin = _main.get_node_or_null("XROrigin3D") as Node3D
 	var err := _udp.bind(SIM_INPUT_PORT, "127.0.0.1")
 	_diag("SimInput UDP listening on 127.0.0.1:%d (bind err=%d)" % [SIM_INPUT_PORT, err])
 
@@ -70,7 +83,7 @@ func _cursor_world() -> Vector3:
 	var hit := _main.get_world_3d().direct_space_state.intersect_ray(q)
 	return hit["position"] if hit else from + fwd
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if not _sim_active:
 		return
 
@@ -79,6 +92,18 @@ func _process(_delta: float) -> void:
 		var cmd := _udp.get_packet().get_string_from_ascii().strip_edges()
 		if cmd != "":
 			_handle_cmd(cmd)
+
+	# Head-tracking prototype (#7): ease the XROrigin toward the commanded head offset (or back to its
+	# home pose when disengaged), so the viewpoint travels with the head. Position-only; runs every frame
+	# independent of the grab handler. When fully recentered we STOP writing the origin so WASD nav, the
+	# world handle, and reset keep control — head-tracking only "owns" the origin while engaged.
+	if is_instance_valid(_xr_origin):
+		var target: Vector3 = _head_target if _head_active else Vector3.ZERO
+		var a: float = clampf(_HEAD_SMOOTH_RATE * delta, 0.0, 1.0)
+		_head_smoothed = _head_smoothed.lerp(target, a)
+		if _head_active or _head_smoothed.length() > 0.001:
+			var home: Transform3D = _main._origin_home
+			_xr_origin.transform = Transform3D(home.basis, home.origin + _head_smoothed)
 
 	if not is_instance_valid(_handler):
 		return
@@ -123,15 +148,29 @@ func _handle_cmd(cmd: String) -> void:
 	if cmd.length() >= 2 and cmd[0] == "H":
 		_handle_source(cmd)
 		return
+	# Explicit immersion SET ("N1" immersive / "N0" mixed) — distinct from the bare "N" toggle below.
+	# Lets the panel stay authoritative so it can label the button Immersive/Mixed (#1). See _handle_immersion.
+	if cmd.length() >= 2 and cmd[0] == "N":
+		_handle_immersion(cmd)
+		return
+	# Head-tracking ("G<x>,<y>,<z>" fake/webcam head position, "GR" recenter) → moves the XROrigin (#7).
+	if cmd.length() >= 1 and cmd[0] == "G":
+		_handle_head(cmd)
+		return
 	match cmd:
 		"C1":
 			_c_held = true
 		"C0":
 			_c_held = false
 		"B":
-			if _main._gesture_cooldown <= 0.0 and _main._gestures_enabled:
-				_main.call("_reset_sandbox")
-				_main._gesture_cooldown = 1.0
+			# Panel Reset = a FULL scene reset (#2). A deliberate click shouldn't be gated by the
+			# in-headset gesture cooldown (that debounce is for stray pinches), and _reset_sandbox alone
+			# leaves the round running (score/timer/spawn grid/music bed) — so also restart the round for a
+			# fresh cascade. _reset_sandbox already clears cubes, returns grabbables, recenters the origin,
+			# and resets the portal.
+			_main.call("_reset_sandbox")
+			if _main.has_method("_start_round"):
+				_main.call("_start_round")
 		"V":
 			if _main._gesture_cooldown <= 0.0 and _main._gestures_enabled:
 				_main.call("_cycle_hands_mode")
@@ -179,6 +218,45 @@ func _handle_source(cmd: String) -> void:
 	cf.set_value("simhands", "source", n)
 	cf.save(_CALIB_PATH)
 	_diag("source=%d" % n)
+
+# Explicit immersion set ("N1" = immersive/opaque sky, "N0" = mixed/passthrough). The panel is the
+# only immersion controller in the sim, so it stays authoritative and can label the button
+# Immersive/Mixed (#1). We read _main._immersive and toggle only when it differs (the engine's
+# _toggle_immersion runs the dissolve transition). Deliberate click → no gesture-cooldown gate.
+func _handle_immersion(cmd: String) -> void:
+	var want := cmd.substr(1) == "1"
+	if bool(_main._immersive) != want:
+		_main.call("_toggle_immersion")
+	_diag("immersion=%s" % ("immersive" if want else "mixed"))
+
+# Head-tracking prototype (#7). "G<x>,<y>,<z>" sets a fake head position (normalized ~-1..1 per axis,
+# from the panel's head pad and, later, webcam face detection); "GR" disengages and recenters. We map
+# it to an XROrigin offset with the SAME hand-scale multiplier as the hand travel (#5: bigger scale →
+# travel far through the scene with small head moves), clamp it per axis, and ease it in _process.
+func _handle_head(cmd: String) -> void:
+	if cmd.substr(1) == "R":
+		_head_active = false
+		_head_target = Vector3.ZERO
+		_diag("head recenter")
+		return
+	var parts := cmd.substr(1).split(",")
+	if parts.size() < 3:
+		return
+	var scale_mult: float = clampf(_current_hand_scale() / 0.09, 0.3, 6.0)
+	var off := Vector3(parts[0].to_float(), parts[1].to_float(), parts[2].to_float()) * _HEAD_BASE_M * scale_mult
+	off.x = clampf(off.x, -_HEAD_MAX_M, _HEAD_MAX_M)
+	off.y = clampf(off.y, -_HEAD_MAX_M, _HEAD_MAX_M)
+	off.z = clampf(off.z, -_HEAD_MAX_M, _HEAD_MAX_M)
+	_head_target = off
+	_head_active = true
+
+# Read the live hand_scale the panel wrote, so head travel uses the SAME scale multiplier as the hands
+# (#5/#7). Falls back to the 0.09 m default when the cfg is absent.
+func _current_hand_scale() -> float:
+	var cf := ConfigFile.new()
+	if cf.load(_CALIB_PATH) != OK:
+		return 0.09
+	return float(cf.get_value("simhands", "hand_scale", 0.09))
 
 # Append-only diagnostic so a headless run can confirm packets arrive. Pull via
 # simctl get_app_container ... data -> Documents/sim_keys.txt.
