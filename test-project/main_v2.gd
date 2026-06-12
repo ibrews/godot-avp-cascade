@@ -1401,9 +1401,11 @@ func _spawn_shockwave(pos: Vector3, color: Color) -> void:
 	ring.material_override = m
 	ring.position = pos
 	# Face the user so the ring reads as a flat expanding flash.
+	# Orient BEFORE entering the tree: look_at() requires is_inside_tree(),
+	# so use look_at_from_position() (ring.position == pos, not yet in tree).
 	var cam := get_viewport().get_camera_3d()
 	if cam != null and not cam.global_position.is_equal_approx(pos):
-		ring.look_at(cam.global_position, Vector3.UP)
+		ring.look_at_from_position(pos, cam.global_position, Vector3.UP)
 	add_child(ring)
 	var tw := create_tween().set_parallel(true)
 	tw.tween_property(ring, "scale", Vector3.ONE * 9.0, 0.45).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
