@@ -41,7 +41,7 @@ Hand tracking is an **engine capability, not a project setting** — no amount o
 
 Experimental WIP. Rendering rides on Apple's official visionOS contribution — [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot)'s `apple/visionos-xr` branch (PR open, not yet merged upstream; Ricardo Sanchez-Saez, Apple visionOS team, is lead author — see the [PR thread](https://github.com/godotengine/godot/pull/109975)). **Hand tracking** rides on [Clancey's fork](https://github.com/Clancey/godot/tree/visionos_master_pr), which rebases hand-interaction support on top — see [Which Godot engine you need](#️-which-godot-engine-you-need-read-this-first) above.
 
-Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26; hand-grab refined through **2026-06-02**. **Live on [TestFlight](https://testflight.apple.com/join/bw1aeExJ)** (build 7, panel `v0.9.34`).
+Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26; hand-grab refined through **2026-06-02**. **Live on [TestFlight](https://testflight.apple.com/join/bw1aeExJ)** — build 8 (2026-06-12): player-set **3-letter leaderboard tag** (new YOUR TAG panel) + **top-20** board.
 
 - 90 FPS locked, **zero variance across a 95-second sample** (19 × 5-second windows)
 - ~475 physics collisions / 95s
