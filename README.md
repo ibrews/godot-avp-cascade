@@ -43,7 +43,7 @@ Hand tracking is an **engine capability, not a project setting** — no amount o
 
 Experimental WIP. Rendering rides on Apple's official visionOS contribution — [rsanchezsaez/godot](https://github.com/rsanchezsaez/godot)'s `apple/visionos-xr` branch (PR open, not yet merged upstream; Ricardo Sanchez-Saez, Apple visionOS team, is lead author — see the [PR thread](https://github.com/godotengine/godot/pull/109975)). **Hand tracking** rides on [Clancey's fork](https://github.com/Clancey/godot/tree/visionos_master_pr), which rebases hand-interaction support on top — see [Which Godot engine you need](#️-which-godot-engine-you-need-read-this-first) above.
 
-Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26; hand-grab refined through **2026-06-02**. **Live on [TestFlight](https://testflight.apple.com/join/bw1aeExJ)** (build 7, panel `v0.9.34`).
+Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDevice14,1) using Xcode 26; hand-grab refined through **2026-06-02**. **Live on [TestFlight](https://testflight.apple.com/join/bw1aeExJ)** — build 8 (2026-06-12): player-set **3-letter leaderboard tag** (new YOUR TAG panel) + **top-20** board.
 
 - 90 FPS locked, **zero variance across a 95-second sample** (19 × 5-second windows)
 - ~475 physics collisions / 95s
@@ -51,7 +51,7 @@ Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDe
 - Mixed immersion (passthrough) — cubes composite into your real room
 - **Pinch-to-grab and throw** any cube with either hand — grab-by-point, anchored to the de-spiked thumb tip
 - **Two-hand pinch to scale + rotate** any object, or the whole world via the floating chrome handle
-- One grabbable **control panel** (HANDS / START / MUTE / GESTURES / SKY / RESET) + a 30 s time-attack with a procedural soundtrack and a global leaderboard
+- One grabbable **control panel** (HANDS / START / MUTE / GESTURES / SKY / RESET) + a 30 s time-attack with a procedural soundtrack and a **global top-20 leaderboard** — set your own **3-letter tag** on the grabbable **YOUR TAG** panel (poke ▲/▼) so your scores post under your name, not a shared default
 - System wrist/Home menu hidden for uninterrupted immersion via the `GodotPersistentSystemOverlays` Info.plist key (build 7)
 
 ## What Cascade Countdown proves
@@ -74,7 +74,7 @@ test-project/
   main_v2.gd          # Cascade Countdown script (~2.8k lines, banner-sectioned) — spawn, physics, audio, hand setup, scoring
   hand_mesh_driver.gd # HandMeshDriver3D — poses the GLTF hand mesh from XRHandTracker joints (bone-frame correction)
   pickup/
-    pickup_handler.gd # PickupHandler3D — pinch detection, fingertip anchoring (Marshall Nowak)
+    pickup_handler.gd # PickupHandler3D — pinch detection, fingertip anchoring (Clancey)
     pickup_able_body.gd # PickupAbleBody3D — grab/snap/throw logic with velocity tracking
   sandbox/            # the procedural gameplay actors, one small class each:
     spawn_emitter.gd      #   SpawnEmitter3D — grabbable cube faucet
@@ -107,7 +107,19 @@ You need:
 - Your Apple Developer Team ID
 - A built `libgodot.a` + matching `Godot.app` editor from **[Clancey/godot](https://github.com/Clancey/godot/tree/visionos_master_pr) `visionos_master_pr` (HEAD `2b2f749`)** for hand tracking — or rsanchezsaez `apple/visionos-xr` if you only want the render-only cascade. See [building-the-engine](#building-the-engine) below. **Build both from the same commit** so the editor that exports the PCK matches the runtime lib.
 
-> 💡 **Prototype in the visionOS Simulator** — far faster to iterate than a device round-trip, and it shows the real spatial render. The **[godot-visionos-simulator-kit](https://github.com/ibrews/godot-visionos-simulator-kit)** gives you a one-command `./build.sh sim | device` switcher plus simulator input + hand-tracking tooling (extracted from this project so any Godot visionOS app can use it). The manual steps below are what it wraps.
+> 💡 **Prototype in the visionOS Simulator** — far faster to iterate than a device round-trip, and it shows the real spatial render. The **[godot-visionos-simulator-kit](https://github.com/ibrews/godot-visionos-simulator-kit)** packages the `build.sh` switcher + simulator input/hand-tracking tooling (extracted from this project so any Godot visionOS app can use it).
+
+### The easy way — one command (`build.sh`)
+
+`build.sh` wraps the whole loop (export PCK → `xcodebuild` → install/launch) and switches between the **simulator** and a real **device** — they differ in destination, code-signing, and install tool (`simctl` vs `devicectl`), so this saves you re-typing the incantation:
+
+```bash
+./build.sh sim      # build + run in the visionOS Simulator — fastest to iterate (recommended for prototyping)
+./build.sh device   # build signed + install on a paired Apple Vision Pro
+./build.sh export   # just re-export the Godot .pck
+```
+
+Every project-specific value (device UDID, sim UDID, signing team, bundle id, paths) lives in the **CONFIG block at the top of `build.sh`** — override via env var or a sibling `build.config` — so the script drops cleanly into other Godot visionOS projects. **Prototype in the Simulator** (`./build.sh sim`): it shows the real spatial render and is far quicker to iterate than a device round-trip. Or run the steps by hand:
 
 ```bash
 # Re-export the PCK from the test-project
@@ -139,7 +151,7 @@ xcrun devicectl device install app \
 1. **Confirm the scene renders at 90 FPS.** Pull diagnostic frame counts after a run: `xcrun devicectl device copy from --device <UDID> --source Documents/xr_diag.txt --destination /tmp/xr_diag.txt --domain-type appDataContainer --domain-identifier com.agilelens.godotvisionpilot`. Per-5s frame deltas should be exactly 450.
 2. **Grab and throw a cube — by any point.** Pinch (index + thumb) near any glowing cube — it sticks to *exactly where you grabbed it* and rotates about that point (grab a flat panel by its edge and the edge stays under your finger, instead of the panel's centre snapping to your hand). Flick your wrist and release to throw it into the goal ring.
 3. **Use the one control panel.** A single grabbable panel holds **all six buttons** in a 2×3 grid — **HANDS** (3-way cycle: mesh → both → real Persona arms — you always see *some* hands, never empty space), **START** (30s round), **MUTE**, **GESTURES** (master on/off for the middle/ring/pinky pinches — index-pinch grab always works), **SKY** (immersion), **RESET** — with a big **★ BEST ★** readout up top. Grab the panel and move it wherever you like; the buttons keep working in their new spot.
-4. **Play the 30-second time attack — with a soundtrack.** Poke **START**. A looping bass-and-drum bed plays one beat per second so you can hear the clock; the final few seconds speed up and rise in pitch. Every cube impact is pitch-snapped to the same key, so the chaos harmonises into a tune over the bed. Land cubes in the goal ring and chain fast surface hits for a multiplier (up to x8); your score posts to the global leaderboard.
+4. **Play the 30-second time attack — with a soundtrack.** Poke **START**. A looping bass-and-drum bed plays one beat per second so you can hear the clock; the final few seconds speed up and rise in pitch. Every cube impact is pitch-snapped to the same key, so the chaos harmonises into a tune over the bed. Land cubes in the goal ring and chain fast surface hits for a multiplier (up to x8); your score posts to the **global top-20 leaderboard** under the **3-letter tag** you set on the **YOUR TAG** panel.
 5. **Keep cubes *alive* — longevity pays off big.** Score rewards how long a cube survives on an **accelerating** curve, so a cube you keep bouncing around the course is worth far more than one that drops straight through. A spinning bar bumper and a prism splitter scatter the falling stream to help (and a literal funnel straight to the goal is now the *worst* strategy, not the best).
 6. **Resize the goal for a difficulty multiplier.** Two-hand-pinch the goal ring to shrink or grow it. A **smaller goal is harder → bigger points multiplier** (up to ×4); a bigger goal is easier → fewer points (down to ×0.25). The live multiplier shows under the ring and on each cash-out popup.
 7. **Beat your high score for fireworks + a cheer.** End a round above your personal best and the whole room fills with a cascade of fireworks bursts and a procedural crowd cheer. Beat the **top score on the online leaderboard** and you get an even bigger, distinct celebration — electric cyan/magenta bursts and a fuller cheer with a sparkle tail.
@@ -162,6 +174,20 @@ For **hand tracking**, build from [Clancey/godot](https://github.com/Clancey/god
 2. Set `script_export_mode=0` (Text) in `export_presets.cfg` so the runtime compiles scripts from source and the token format no longer has to match. This repo currently uses Text mode because its editor (4.6.3) and lib (Clancey 4.6.2) differ.
 
 The key engine-build gotchas (the `XROrigin3D.current=true` requirement, the mobile-renderer constraint, and the editor/lib version-match rule) are all captured in this README — see [Troubleshooting](#troubleshooting) and [Known limitations](#known-limitations). The engine source tree is `.gitignore`'d here (regenerable from the fork above).
+
+## Simulator dev tools
+
+The visionOS **Simulator** gives a custom-Metal immersive app no working in-app keyboard and no ARKit
+hand anchors, so two host-side helpers drive it (both sim-only; zero effect on device):
+
+- **`tools/SimControlPanel/`** — a macOS SwiftUI window with buttons/toggles/sliders that send
+  commands over UDP `127.0.0.1:9999` (immersion, reset, cycle hands, grab) and stream simulated
+  SimHands hand-tracking over MultipeerConnectivity, with **live hand-placement calibration** sliders.
+  Build with `./tools/SimControlPanel/build.sh`. See [its README](tools/SimControlPanel/README.md).
+- **`tools/SimInputTap.swift`** / **`tools/simhands_canned_sender.swift`** — the original CLI building
+  blocks (global key-tap → UDP; canned MC hand feed) the panel is lifted from.
+
+Background + the calibration architecture: KB `intelligence/techniques/godot-avp-simulator-dev-tools.md`.
 
 ## Real Persona arms (the `upper_limb.txt` toggle)
 
@@ -222,7 +248,7 @@ In mixed immersion, visionOS CompositorServices requires **alpha == 0 wherever d
 
 - Engine: [Godot](https://godotengine.org/) — open source
 - visionOS XR port: [Ricardo Sanchez-Saez @ Apple](https://github.com/rsanchezsaez) + community contributors (huisedenanhai, stuartcarnie, BastiaanOlij)
-- **Hand tracking pickup system:** [Marshall Nowak (Nocxr)](https://github.com/Nocxr) — `PickupHandler3D` / `PickupAbleBody3D` from [visionosxr_hand_tracking](https://github.com/Clancey/godot/tree/visionos_master_pr), ported from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
+- **Hand tracking pickup system:** [James Clancey](https://github.com/Clancey) — `PickupHandler3D` / `PickupAbleBody3D` from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
 - Cascade Countdown game + writeup: [Alex Coulombe (@ibrews)](https://github.com/ibrews)
 
 ## License

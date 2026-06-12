@@ -53,7 +53,14 @@ Swift-block-buffered to a pipe (looks empty); trust the **app-side** os_log for 
 visual of the actual hands (GUI/human step).
 
 ### Calibration knobs (all at the top of `clancey-godot/modules/visionos_xr/simhands_bridge.mm`)
-These got first light but are NOT tuned to feel right — needs a human in the sim:
+**LIVE-TUNABLE as of 2026-06-07** — use the macOS **SimControlPanel** (`tools/SimControlPanel/`,
+sliders Y offset / depth / hand scale + advanced plane / z-gain). It sends `K*` verbs on UDP 9999 →
+`simulator_input.gd` writes `user://simhands_calibration.cfg` → the bridge re-reads it ~9 Hz and
+applies it live (no rebuild per tweak; "Reset" restores the defaults below). Verified end-to-end
+(`KY1.5`+`KD0.8` → `wrist=(0.00,1.34,-0.80)`). The constants below are now just the first-light
+DEFAULTS; once you find values that feel right, bake them into the `SIMHANDS_DEF_*` so device/real
+helper paths inherit them. Full write-up: KB `intelligence/techniques/godot-avp-simulator-dev-tools.md`.
+Still needs a human in the sim to judge what "feels right":
 - `SIMHANDS_HAND_KNUCKLE_M` (0.09) — self-normalized hand size. Raise/lower if the hand reads too
   big/small. Drives whether pinch distances land in the 0.024 m band (they currently do).
 - `SIMHANDS_PLANE_M` (0.55) — how far hand x/y travels as you move in the camera frame.

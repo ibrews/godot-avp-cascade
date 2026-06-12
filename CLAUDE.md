@@ -4,14 +4,16 @@ You are working on an Apple Vision Pro Godot pilot. Read this before doing anyth
 
 ## ⭐ Prototype in the visionOS Simulator — NOT the desktop Godot build
 
-**Always build/run in the visionOS Simulator to prototype.** It shows the real spatial render and is
-much easier to test than a device round-trip. Do NOT use desktop Godot (`Godot.app --path
-test-project`) as a stand-in — it renders broken XR visuals (audio only). GDScript/PCK changes need no
-engine rebuild: re-export the PCK → `xcodebuild` for `platform=visionOS Simulator` → `xcrun simctl
-install/launch`. Sim UDID: `A540B3B5-CB1D-477D-A3B9-A6D41598B704`; the sim has no hand input, so a round
-auto-starts when `SIMULATOR_DEVICE_NAME` is set. For a one-command sim/device switcher + sim input/hands
+**Always build/run in the visionOS Simulator to prototype (per Alex).** Do NOT run the project on
+desktop Godot (`Godot.app --path test-project`) as a stand-in — it renders broken XR visuals (audio
+plays but the spatial scene doesn't), so it misleads. The Simulator shows the real render and is much
+easier to test. GDScript/PCK changes need **no engine rebuild** — re-export the PCK, then `xcodebuild`
+for `platform=visionOS Simulator` + `xcrun simctl install/launch`. Sim UDID (Apple Vision Pro):
+`A540B3B5-CB1D-477D-A3B9-A6D41598B704`. The sim has no hand input, so a round auto-starts when
+`SIMULATOR_DEVICE_NAME` is set (bed audible). For a one-command sim/device switcher + sim input/hands
 tooling, use **[godot-visionos-simulator-kit](https://github.com/ibrews/godot-visionos-simulator-kit)**.
-Full recipe + gotchas: KB `intelligence/techniques/godot-avp-simulator-input.md`.
+Full recipe + GUI dev tools: KB `intelligence/techniques/godot-avp-simulator-input.md` and
+`…-simulator-dev-tools.md`.
 
 ## Read the KB first
 

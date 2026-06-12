@@ -261,7 +261,13 @@ var _info_panel_t := 0.0
 const ROUND_SECONDS := 30.0
 const LEADERBOARD_URL := "https://script.google.com/macros/s/AKfycbzfnTbrGnRE0ANAVujqDWRyYi_eub7HOvS-m3uI3WY-ysMw0LohX3d48iyE7D86jn5R/exec"
 const LEADERBOARD_KEY := "cascade-2026"   # must match Code.gs APP_KEY
-const PLAYER_INITIALS := "AGL"            # 3-letter tag posted with the score
+# Player tag posted with each score. Set in-world via the grabbable "YOUR TAG"
+# picker (3 slots, poke ▲/▼ to cycle A–Z); persisted to user://initials.txt.
+# Defaults to AAA until the player sets it, so the global leaderboard fills with
+# distinct names instead of everyone showing the same hardcoded tag.
+var _player_initials := "AAA"
+var _initials_chars: Array[int] = [0, 0, 0]    # A=0 … Z=25, one per slot
+var _tag_letter_labels: Array[Label3D] = []    # the 3 big letters on the picker
 var _timer_active := false
 var _timer_remaining := 0.0
 var _round_score := 0
@@ -293,7 +299,7 @@ var _real_arms_visible := false
 
 # --- In-world live leaderboard panel (grabbable, like the info panel) ---
 const LB_REFRESH_SEC := 15.0
-const LB_ROWS := 8
+const LB_ROWS := 20   # top-20 leaderboard (backend clamps 1..100, default 20)
 var _lb_rows_label: Label3D
 var _lb_http: HTTPRequest
 var _lb_refresh_t := 0.0
@@ -351,9 +357,11 @@ func _ready():
 	add_child(_lb_http)
 	_lb_http.request_completed.connect(_on_lb_completed)
 	_load_best()
+	_load_initials()
 	_load_arms_pref()
 	_build_control_panel()   # ONE panel: HANDS/START/MUTE/GESTURES/SKY/RESET + BEST readout
 	_build_leaderboard_panel()
+	_build_initials_panel()  # "YOUR TAG" 3-letter picker → drives the leaderboard name
 	_build_instructions_panel()
 	_fetch_leaderboard()
 	# Launch into immersive (opaque sky) by default, not mixed.
@@ -1393,9 +1401,11 @@ func _spawn_shockwave(pos: Vector3, color: Color) -> void:
 	ring.material_override = m
 	ring.position = pos
 	# Face the user so the ring reads as a flat expanding flash.
+	# Orient BEFORE entering the tree: look_at() requires is_inside_tree(),
+	# so use look_at_from_position() (ring.position == pos, not yet in tree).
 	var cam := get_viewport().get_camera_3d()
 	if cam != null and not cam.global_position.is_equal_approx(pos):
-		ring.look_at(cam.global_position, Vector3.UP)
+		ring.look_at_from_position(pos, cam.global_position, Vector3.UP)
 	add_child(ring)
 	var tw := create_tween().set_parallel(true)
 	tw.tween_property(ring, "scale", Vector3.ONE * 9.0, 0.45).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
@@ -2249,7 +2259,8 @@ func _write_arms_pref() -> void:
 # callback. BoxMesh face + Label3D, depress animation + cooldown handled centrally by
 # _update_poke_buttons.
 func _add_poke_button(parent: Node3D, local_pos: Vector3, text: String,
-		base: Color, emis: Color, cb: Callable) -> Dictionary:
+		base: Color, emis: Color, cb: Callable,
+		box_size := Vector3(0.20, 0.075, 0.025), cooldown_time := 0.6) -> Dictionary:
 	var btn := Node3D.new()
 	btn.position = local_pos
 	parent.add_child(btn)
@@ -2257,7 +2268,7 @@ func _add_poke_button(parent: Node3D, local_pos: Vector3, text: String,
 	btn.add_child(face)
 	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
-	bm.size = Vector3(0.20, 0.075, 0.025)
+	bm.size = box_size
 	mi.mesh = bm
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
@@ -2277,7 +2288,7 @@ func _add_poke_button(parent: Node3D, local_pos: Vector3, text: String,
 	lbl.text = text
 	lbl.position = Vector3(0, 0, 0.015)
 	face.add_child(lbl)
-	var entry := {"node": btn, "face": face, "mat": mat, "label": lbl, "cb": cb, "cooldown": 0.0}
+	var entry := {"node": btn, "face": face, "mat": mat, "label": lbl, "cb": cb, "cooldown": 0.0, "recool": cooldown_time}
 	_poke_buttons.append(entry)
 	return entry
 
@@ -2451,7 +2462,7 @@ func _update_poke_buttons(delta: float) -> void:
 			var was_inside: bool = bool(inside[side])
 			# Fire ONLY on the rising edge, and only when not suppressed + off cooldown.
 			if now_inside and not was_inside and not suppress and float(e["cooldown"]) <= 0.0:
-				e["cooldown"] = 0.6
+				e["cooldown"] = float(e.get("recool", 0.6))
 				_depress(e["face"])
 				_push_click()
 				(e["cb"] as Callable).call()
@@ -2473,7 +2484,7 @@ func _submit_score(score: int) -> void:
 	if _http == null or LEADERBOARD_URL == "":
 		return
 	var url := "%s?submit=1&name=%s&score=%d&key=%s" % [
-		LEADERBOARD_URL, PLAYER_INITIALS.uri_encode(), score, LEADERBOARD_KEY.uri_encode()]
+		LEADERBOARD_URL, _player_initials.uri_encode(), score, LEADERBOARD_KEY.uri_encode()]
 	_http.request(url)
 
 # Grabbable in-world leaderboard panel (top scores, auto-refreshing). Movable +
@@ -2490,7 +2501,7 @@ func _build_leaderboard_panel() -> void:
 	add_child(root)
 
 	var size_x := 0.34
-	var size_y := 0.40
+	var size_y := 0.50   # taller to fit up to 20 rows
 
 	# Accent + dark backing (same look as the info panel).
 	var accent_mat := StandardMaterial3D.new()
@@ -2522,7 +2533,7 @@ func _build_leaderboard_panel() -> void:
 	title.position = Vector3(0, size_y * 0.5 - 0.035, 0.006)
 	root.add_child(title)
 
-	_lb_rows_label = _panel_label("loading…", 24, Color(1, 1, 1, 0.96), 5)
+	_lb_rows_label = _panel_label("loading…", 21, Color(1, 1, 1, 0.96), 5)
 	_lb_rows_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_lb_rows_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 	_lb_rows_label.position = Vector3(-size_x * 0.5 + 0.03, size_y * 0.5 - 0.085, 0.006)
@@ -2572,7 +2583,8 @@ func _on_lb_completed(_result: int, code: int, _headers: PackedStringArray, body
 		# end can tell a world-record from a merely-personal best.
 		if i == 1:
 			_lb_top_score = sc
-		lines.append("%2d  %-8s %5d" % [i, nm, sc])
+		var you := "  ◄" if nm == _player_initials else ""
+		lines.append("%2d  %-8s %5d%s" % [i, nm, sc, you])
 		i += 1
 	_lb_rows_label.text = "\n".join(lines)
 
@@ -2588,6 +2600,135 @@ func _save_best() -> void:
 	if f != null:
 		f.store_line(str(_best_score))
 		f.close()
+
+# --- Player tag (initials) persistence + in-world picker ---------------------
+# Mirrors _load_best/_save_best. user://initials.txt holds the 3-letter tag.
+func _load_initials() -> void:
+	if not FileAccess.file_exists("user://initials.txt"):
+		return
+	var f := FileAccess.open("user://initials.txt", FileAccess.READ)
+	if f == null:
+		return
+	var s := f.get_line().strip_edges().to_upper()
+	f.close()
+	_apply_initials(s)
+
+func _save_initials() -> void:
+	var f := FileAccess.open("user://initials.txt", FileAccess.WRITE)
+	if f != null:
+		f.store_line(_player_initials)
+		f.close()
+
+# Sanitise any string to exactly 3 A–Z chars and sync _player_initials + the
+# per-slot indices the picker drives.
+func _apply_initials(s: String) -> void:
+	var clean := ""
+	for ch in s:
+		if ch >= "A" and ch <= "Z":
+			clean += ch
+		if clean.length() >= 3:
+			break
+	while clean.length() < 3:
+		clean += "A"
+	_player_initials = clean
+	for k in range(3):
+		_initials_chars[k] = clean.unicode_at(k) - 65
+
+func _initials_string() -> String:
+	var s := ""
+	for c in _initials_chars:
+		s += char(65 + int(c))
+	return s
+
+func _refresh_tag_labels() -> void:
+	for k in range(_tag_letter_labels.size()):
+		var lbl: Label3D = _tag_letter_labels[k]
+		if lbl != null and k < _initials_chars.size():
+			lbl.text = char(65 + int(_initials_chars[k]))
+
+# Poke-▲/▼ callback for letter slot `slot` (0..2), cycling A–Z by `dir` (+1/-1).
+# Auto-saves so the tag persists; the next round's score posts under it.
+func _cycle_tag(slot: int, dir: int) -> void:
+	if slot < 0 or slot >= _initials_chars.size():
+		return
+	_initials_chars[slot] = (int(_initials_chars[slot]) + dir + 26) % 26
+	_player_initials = _initials_string()
+	_refresh_tag_labels()
+	_save_initials()
+
+# Grabbable "YOUR TAG" panel: three letter slots, each with a poke-▲ and poke-▼
+# to cycle A–Z. Same look/behaviour as the other panels. No destruct button (it
+# stays available like the control panel, and a clear ▼ row avoids poke-sphere
+# overlap with a destruct button at the panel bottom).
+func _build_initials_panel() -> void:
+	var root := PickupAbleBody3D.new()
+	root.name = "TagPanel"
+	root.position = Vector3(0.5, 1.12, -0.62)   # below the leaderboard, right side
+	root.collision_layer = LAYER_GRAB_ONLY
+	root.collision_mask = 0
+	root.freeze = true
+	root.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	root.freeze_on_release = true
+	add_child(root)
+
+	var size_x := 0.40
+	var size_y := 0.32
+
+	var accent_mat := StandardMaterial3D.new()
+	accent_mat.albedo_color = Color(0.30, 0.95, 0.80, 0.30)
+	accent_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	accent_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	accent_mat.emission_enabled = true
+	accent_mat.emission = Color(0.30, 0.95, 0.80)
+	var accent := MeshInstance3D.new()
+	var aq := QuadMesh.new()
+	aq.size = Vector2(size_x + 0.016, size_y + 0.016)
+	accent.mesh = aq
+	accent.material_override = accent_mat
+	accent.position = Vector3(0, 0, -0.004)
+	root.add_child(accent)
+
+	var bg := MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(size_x, size_y)
+	bg.mesh = quad
+	var bgmat := StandardMaterial3D.new()
+	bgmat.albedo_color = Color(0.03, 0.03, 0.05, 0.85)
+	bgmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bgmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg.material_override = bgmat
+	root.add_child(bg)
+
+	var title := _panel_label("◆ YOUR TAG ◆", 24, Color(0.40, 1.0, 0.85, 1.0), 7)
+	title.position = Vector3(0, size_y * 0.5 - 0.032, 0.006)
+	root.add_child(title)
+	var hint := _panel_label("poke ▲ / ▼ to set your initials", 12, Color(0.80, 0.96, 0.90, 0.92), 4)
+	hint.position = Vector3(0, size_y * 0.5 - 0.070, 0.006)
+	root.add_child(hint)
+
+	_tag_letter_labels.clear()
+	var col_x: Array[float] = [-0.12, 0.0, 0.12]
+	var btn_box := Vector3(0.075, 0.05, 0.02)
+	var b_base := Color(0.10, 0.34, 0.30)
+	var b_emis := Color(0.25, 0.95, 0.80)
+	for k in range(3):
+		var cx: float = col_x[k]
+		_add_poke_button(root, Vector3(cx, 0.020, 0.012), "▲", b_base, b_emis,
+			_cycle_tag.bind(k, 1), btn_box, 0.22)
+		var letter := _panel_label("A", 56, Color(1.0, 1.0, 1.0, 1.0), 8)
+		letter.position = Vector3(cx, -0.058, 0.006)
+		root.add_child(letter)
+		_tag_letter_labels.append(letter)
+		_add_poke_button(root, Vector3(cx, -0.128, 0.012), "▼", b_base, b_emis,
+			_cycle_tag.bind(k, -1), btn_box, 0.22)
+	_refresh_tag_labels()
+
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(size_x, size_y, 0.03)
+	cs.shape = box
+	root.add_child(cs)
+	_register_grabbable(root)
 
 
 # ============================================================================

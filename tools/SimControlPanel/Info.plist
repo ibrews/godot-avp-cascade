@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>SimControlPanel</string>
+	<key>CFBundleDisplayName</key>
+	<string>Godot Sim Control Panel</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.agilelens.simcontrolpanel</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>SimControlPanel</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<!-- MultipeerConnectivity (SimHands "Bonjour" feed) needs Local Network + the Bonjour
+	     service declared. The visionOS app declares the same services on its side. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Feeds simulated hand tracking to the Godot visionOS Simulator over the local network (SimHands bridge). Simulator-only dev tooling.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_Bonjour._tcp</string>
+		<string>_Bonjour._udp</string>
+	</array>
+</dict>
+</plist>
