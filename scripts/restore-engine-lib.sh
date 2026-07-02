@@ -6,11 +6,14 @@
 # render-only rsanchezsaez engine).
 #
 # WHY THIS EXISTS
-#   Hand tracking ONLY works with Marshall Nowak's Clancey visionos_master_pr
-#   build of libgodot.a. That binary is borrowed (licensing unclear) and 181MB,
-#   so it is intentionally NOT committed to this PUBLIC repo. A fresh clone
-#   builds fine but reverts to the render-only engine and silently loses hand
-#   tracking (cubes render, nothing grabbable, no permission prompt).
+#   Hand tracking ONLY works with Clancey's visionos_master_pr build of libgodot.a
+#   (the Clancey fork, NOT rsanchezsaez's render-only branch). Marshall Nowak packaged
+#   and relayed that prebuilt binary to us — he did not author it. It is 181MB and
+#   borrowed (licensing unclear), so it is intentionally NOT committed to this PUBLIC
+#   repo. A fresh clone builds fine but reverts to the render-only engine and silently
+#   loses hand tracking (cubes render, nothing grabbable, no permission prompt).
+#   Because it is just Clancey's build, a from-source build of Clancey visionos_master_pr
+#   reproduces an equivalent hand-tracking lib.
 #
 #   This script copies the known-good lib from the local durable archive into
 #   the xcframework. Run it once after cloning, and after any full --export.
