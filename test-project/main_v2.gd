@@ -2135,8 +2135,10 @@ func _refresh_button_label() -> void:
 
 # --- Real Persona-arm (upper-limb passthrough) toggle ----------------------
 # Distinct from the virtual GLTF hand mesh (middle-pinch). This pokable button
-# writes a preference the recompiled engine polls and applies to the SwiftUI
-# .upperLimbVisibility — the real arms fade in/out live, no relaunch needed.
+# calls VisionOSXRInterface.set_upper_limb_visibility(), which drives the SwiftUI
+# .upperLimbVisibility live — the real arms fade in/out with no relaunch. It also
+# still writes the legacy user://upper_limb.txt pref (harmless, and keeps older
+# file-poll engine builds working).
 
 # Sync the button state with any preference persisted from a prior session, so the
 # label matches what the engine will actually show at launch.
@@ -2155,6 +2157,8 @@ func _load_arms_pref() -> void:
 	if _real_arms_visible:
 		_hand_mesh_visible = false
 	_apply_hand_visibility()
+	# Push the restored preference to the engine so launch state matches the label.
+	_apply_arms_to_engine()
 
 # The HANDS button is a HANDS-MODE selector: it switches between virtual MESH
 # hands and real Persona ARMS (two different things, mutually exclusive) rather than
@@ -2243,13 +2247,26 @@ func _apply_hand_visibility() -> void:
 	_write_arms_pref()
 	_refresh_arms_label()
 
-# Persist the real-arm preference; user://upper_limb.txt maps to Documents/upper_limb.txt,
-# which the recompiled engine polls (~0.5s) and applies to SwiftUI .upperLimbVisibility.
+# Persist the real-arm preference AND push it to the engine's runtime API. The file
+# (user://upper_limb.txt) is kept for cross-launch restore + older file-poll engine builds;
+# _apply_arms_to_engine() drives the current VisionOSXRInterface API for live updates.
 func _write_arms_pref() -> void:
 	var f := FileAccess.open("user://upper_limb.txt", FileAccess.WRITE)
 	if f != null:
 		f.store_string("visible" if _real_arms_visible else "hidden")
 		f.close()
+	_apply_arms_to_engine()
+
+# Push the current real-arm state to VisionOSXRInterface.set_upper_limb_visibility().
+# No-op off-device / in the editor: find_interface returns null when the visionOS XR
+# interface isn't present, and .call() keeps this script loadable under desktop Godot
+# (which has no visionos_xr module / VisionOSXRInterface class). 1 = VISIBLE, 2 = HIDDEN
+# (VisionOSXRInterface.UPPER_LIMB_VISIBILITY_VISIBLE / _HIDDEN).
+func _apply_arms_to_engine() -> void:
+	var xr := XRServer.find_interface("visionOS")
+	if xr == null:
+		return
+	xr.call("set_upper_limb_visibility", 1 if _real_arms_visible else 2)
 
 # --- Unified control panel --------------------------------------------------
 # ONE grabbable panel holds all six buttons (NO destruct button). Each poke button is
