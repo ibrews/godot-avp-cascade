@@ -254,3 +254,7 @@ In mixed immersion, visionOS CompositorServices requires **alpha == 0 wherever d
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Support
+
+If you like seeing this kind of thing get built and shared, [donations are always welcome](https://www.alexcoulombepresents.com/support) — they buy hardware, render time, and the freedom to keep giving most of this away.
