@@ -171,15 +171,19 @@ That's it. One disclosed data type, the most minimal possible.
 
 ## Screenshots — REQUIREMENTS
 
-**visionOS App Store requires 3840 × 2160 PNG or JPG screenshots.** Minimum 1, maximum 10. Recommended: 4–6.
+**visionOS App Store requires 3840 × 2160 PNG or JPG screenshots (16:9), no alpha channel.** Minimum 1, maximum 10. Recommended: 4–6.
 
-Existing captures in `captures/` are 1280×720 or 1920×1080 — **none meet spec**. You'll need to recapture via:
+Existing captures in `captures/` are 1280×720 or 1920×1080 — **none meet spec**. Confirmed against Apple's current screenshot-specifications page (2026-08-27): 3840×2160 is exact and non-negotiable.
 
-1. Put on the AVP (with Dev Strap attached)
-2. Xcode → Window → **Devices and Simulators**
-3. Select Apple Vision Pro in the left pane
-4. Click **Take Screenshot**
-5. Repeat for each shot you want
+**Correction (2026-08-27): the plain "Devices and Simulators → Take Screenshot" button does NOT produce spec-quality captures for an immersive app** — it's meant for flat iOS/iPadOS device UI, and native on-device screenshots also suffer visible foveated-rendering blur outside the gaze center. The tool that actually hits 3840×2160 with full sharpness (and can include hand occlusion) is Reality Composer Pro's **Developer Capture**:
+
+1. Put on the AVP, enable Developer Mode (Settings → Privacy & Security), then Settings → General → Remote Devices → select this Mac.
+2. In Xcode, open **Window → Devices and Simulators**, select the AVP, click **Pair**, enter the code shown in the headset.
+3. **Xcode → Open Developer Tool → Reality Composer Pro → File → Developer Capture.** A small floating camera-icon window opens.
+4. With Cascade running and the shot framed, click the stills-camera icon (60s capture window) and press **spacebar** to take each still — repeat for each shot in the sequence below.
+5. Video capture (for App Preview reshoots, if ever needed) works the same way via the video-camera icon and also meets 3840×2160 — plain Control Center recording / QuickTime does not.
+
+Sources: [Apple screenshot specifications](https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications), [MacStories — best way to take Vision Pro screenshots](https://www.macstories.net/stories/the-best-way-to-take-screenshots-on-apple-vision-pro/).
 
 **Suggested 6-shot sequence (in display order):**
 
