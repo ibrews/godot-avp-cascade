@@ -11,7 +11,7 @@ extends Node3D
 #   ring→thumb   = reset everything       pinky→thumb  = toggle sky (immersion / passthrough)
 
 # Shown on the in-world info panel; bump on meaningful releases. (Full changelog lives in git log.)
-const APP_VERSION := "v0.9.36-tagkbd"
+const APP_VERSION := "v0.9.37-race"
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -318,6 +318,48 @@ var _destruct_cooldown := 0.0
 # stay easy to pick up (visual mesh unchanged).
 const MIN_GRAB_SIDE := 0.10
 
+# --- Multiplayer race (3-2-1 countdown + 30s score race) --------------------
+# See the "MULTIPLAYER RACE" section near the end of this file for the full
+# implementation. Vars declared here alongside the other panel/round state.
+const RACE_PORT := 40223            # deliberately distinct from Tank Commander's 40123
+const RACE_BCAST_PORT := 40224      # UDP LAN-discovery beacon port
+const RACE_LAN_SEARCH_TIMEOUT := 4.0   # give the LAN beacon this long before falling back to relay
+const RACE_HOST_RELAY_DELAY := 6.0     # host: if no LAN client shows up in this long, ALSO open the relay
+const RACE_RELAY_URL := "wss://tank-commander.alexcoulombe.workers.dev/ws/cascade-countdown"
+const RACE_COUNTDOWN_MS := 3000     # 3-2-1 lead time, synced via wall-clock (Time.get_unix_time_from_system)
+const RACE_SCORE_HZ := 2.0          # how often each racer broadcasts their live score
+
+var _race_hosting := false
+var _race_client := false
+var _race_searching := false
+var _race_enet_up := false          # true once our ENetMultiplayerPeer is actually connected
+var _race_peer: ENetMultiplayerPeer
+var _race_beacon: PacketPeerUDP     # host: broadcasts presence on the LAN
+var _race_listen: PacketPeerUDP     # client: listens for the host's beacon
+var _race_beacon_t := 0.0
+var _race_search_t := 0.0
+var _race_host_relay_wait_t := 0.0  # host: counts down to also opening the relay as WAN fallback
+
+var _race_relay: WebSocketPeer = null
+var _race_relay_up := false
+var _race_relay_connecting := false
+var _race_relay_id := ""
+var _race_relay_peer_joined := false
+
+var _race_countdown_active := false
+var _race_countdown_at_ms := 0
+var _race_countdown_last_shown := 999
+var _race_mode := false             # true from GO until the race's _end_round() fires
+var _race_score_bcast_t := 0.0
+var _race_scores := {}              # tag (String) -> score (int), every known racer incl. self
+
+var _race_status_label: Label3D
+var _race_rows_label: Label3D
+var _race_host_btn: Node3D
+var _race_join_btn: Node3D
+var _race_leave_btn: Node3D
+var _race_start_btn_node: Node3D
+
 # ============================================================================
 # LIFECYCLE & XR INIT
 # ============================================================================
@@ -365,8 +407,14 @@ func _ready():
 	_build_control_panel()   # ONE panel: HANDS/START/MUTE/GESTURES/SKY/RESET + BEST readout
 	_build_leaderboard_panel()
 	_build_initials_panel()  # "YOUR TAG" 3-letter picker → drives the leaderboard name
+	_build_race_panel()      # HOST/JOIN/LEAVE + START RACE — 3-2-1 countdown, 30s score race
 	_build_instructions_panel()
 	_fetch_leaderboard()
+	multiplayer.peer_connected.connect(_on_race_peer_connected)
+	multiplayer.peer_disconnected.connect(_on_race_peer_disconnected)
+	multiplayer.connected_to_server.connect(_on_race_connected_to_server)
+	multiplayer.connection_failed.connect(_on_race_connection_failed)
+	multiplayer.server_disconnected.connect(_on_race_server_disconnected)
 	# Launch into immersive (opaque sky) by default, not mixed.
 	_immersive = true
 	if _skybox != null:
@@ -958,6 +1006,7 @@ func _process(delta: float):
 	_update_music_bed(delta)
 	_update_poke_buttons(delta)
 	_update_leaderboard(delta)
+	_race_process(delta)
 	_update_destruct(delta)
 	_update_grab_sound()
 	_update_two_hand_scale()  # both hands pinch → scale world (handle) or held object
@@ -1939,6 +1988,11 @@ func _update_timer(delta: float) -> void:
 		var urgency := 1.0 - clampf(_timer_remaining / ROUND_SECONDS, 0.0, 1.0)
 		_start_button_mat.emission = Color(0.2 + urgency * 0.8, 0.9 - urgency * 0.7, 0.45 - urgency * 0.3)
 	_refresh_button_label()
+	if _race_mode:
+		_race_score_bcast_t -= delta
+		if _race_score_bcast_t <= 0.0:
+			_race_score_bcast_t = 1.0 / RACE_SCORE_HZ
+			_race_broadcast_my_score()
 	if _timer_remaining <= 0.0:
 		_end_round()
 
@@ -2040,6 +2094,8 @@ func _end_round() -> void:
 	_submit_score(final_score)
 	_start_cooldown = 2.5
 	_refresh_button_label()
+	if _race_mode:
+		_race_finish_round(final_score)
 
 # Big scene-spanning celebration for a new high score. tier 1 = personal best (warm/gold
 # bursts + a crowd cheer); tier 2 = beat the WORLD leaderboard top (bigger, distinct cyan/
@@ -2417,6 +2473,10 @@ func _gp_start() -> void:
 	# Respect the post-round / post-cancel settle window so a lingering finger can't
 	# instantly restart (the registry's own 0.6 s cooldown is shorter than this).
 	if _start_cooldown > 0.0:
+		return
+	# A networked race owns _start_round()/_end_round() while it's queued or running —
+	# don't let the solo button fight the synced countdown/race window.
+	if _race_countdown_active or _race_mode:
 		return
 	if _timer_active:
 		_cancel_round()
@@ -3309,3 +3369,487 @@ func _append_log(msg: String):
 		f.store_string(msg + "\n")
 		f.close()
 		print("[Sandbox] " + msg)
+
+# ============================================================================
+# MULTIPLAYER RACE — 3-2-1 countdown, then everyone races 30s for high score
+# ============================================================================
+# Deliberately small: no transform/physics replication, each racer runs their
+# OWN local cascade (reusing _start_round/_update_timer/_end_round unchanged)
+# and only a start signal + periodic score numbers cross the network.
+#
+# TWO TRANSPORTS, chosen the same way Tank Commander's net.gd does:
+#   ENet  — host/client ENetMultiplayerPeer + UDP broadcast LAN discovery.
+#   Relay — a plain WebSocketPeer talking JSON to the ALREADY-DEPLOYED Tank
+#           Commander Cloudflare Durable Object (room "cascade-countdown", so
+#           traffic never mixes with Tank Commander's own "main" room), used
+#           as the WAN fallback: a client falls back to it if no LAN beacon
+#           answers within RACE_LAN_SEARCH_TIMEOUT; a host ALSO opens it after
+#           RACE_HOST_RELAY_DELAY if no LAN client has shown up yet, so a
+#           remote friend can still join. The relay is generic pure-broadcast
+#           (no server authority — see cloudflare-durable-object-multiplayer-
+#           relay-pattern.md), so every relay send applies the effect locally
+#           FIRST and sends with "echo": false — the message only ever reaches
+#           the other socket, never boomerangs back to its own sender.
+# RPCs (ENet path) and their relay-JSON equivalents funnel into the same
+# _apply_* functions so gameplay code never has to know which transport is live.
+
+func _race_set_status(s: String) -> void:
+	if _race_status_label != null:
+		_race_status_label.text = s
+
+func _race_has_any_peer() -> bool:
+	if _race_enet_up and multiplayer.get_peers().size() > 0:
+		return true
+	if _race_relay_up and _race_relay_peer_joined:
+		return true
+	return false
+
+func _race_update_start_button_visibility() -> void:
+	if _race_start_btn_node == null:
+		return
+	var can_start: bool = _race_hosting and not _race_countdown_active and not _timer_active \
+		and not _race_mode and _race_has_any_peer()
+	_race_start_btn_node.visible = can_start
+
+# HOST/JOIN are only offered while idle; LEAVE replaces both the moment we're
+# hosting, joining, searching, or relay-connecting/connected — they occupy the
+# same panel real estate but are never visible at the same time (see the poke-
+# button-panel gotcha: hidden buttons never hit-test, so overlap is safe).
+func _race_update_button_visibility() -> void:
+	var active: bool = _race_hosting or _race_client or _race_searching \
+		or _race_relay_connecting or _race_relay_up
+	if _race_host_btn != null:
+		_race_host_btn.visible = not active
+	if _race_join_btn != null:
+		_race_join_btn.visible = not active
+	if _race_leave_btn != null:
+		_race_leave_btn.visible = active
+	_race_update_start_button_visibility()
+
+# --- Panel ------------------------------------------------------------------
+func _build_race_panel() -> void:
+	var root := PickupAbleBody3D.new()
+	root.name = "RacePanel"
+	root.position = Vector3(-0.5, 0.70, -0.5)   # below the control panel, left side
+	root.collision_layer = LAYER_GRAB_ONLY
+	root.collision_mask = 0
+	root.freeze = true
+	root.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	root.freeze_on_release = true
+	add_child(root)
+
+	var size_x := 0.46
+	var size_y := 0.56
+
+	var accent_mat := StandardMaterial3D.new()
+	accent_mat.albedo_color = Color(1.0, 0.55, 0.20, 0.30)
+	accent_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	accent_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	accent_mat.emission_enabled = true
+	accent_mat.emission = Color(1.0, 0.55, 0.20)
+	var accent := MeshInstance3D.new()
+	var aq := QuadMesh.new()
+	aq.size = Vector2(size_x + 0.016, size_y + 0.016)
+	accent.mesh = aq
+	accent.material_override = accent_mat
+	accent.position = Vector3(0, 0, -0.006)
+	root.add_child(accent)
+
+	var bg := MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(size_x, size_y)
+	bg.mesh = quad
+	var bgmat := StandardMaterial3D.new()
+	bgmat.albedo_color = Color(0.03, 0.03, 0.05, 0.85)
+	bgmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bgmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bg.material_override = bgmat
+	bg.position = Vector3(0, 0, -0.003)
+	root.add_child(bg)
+
+	var title := _panel_label("◆ RACE ◆", 24, Color(1.0, 0.65, 0.25, 1.0), 7)
+	title.position = Vector3(0, size_y * 0.5 - 0.032, 0.006)
+	root.add_child(title)
+	_race_status_label = _panel_label("IDLE", 15, Color(0.90, 0.90, 0.95, 0.95), 4)
+	_race_status_label.position = Vector3(0, size_y * 0.5 - 0.068, 0.006)
+	root.add_child(_race_status_label)
+
+	# Row 0 (y=+0.05): HOST | JOIN, mutually exclusive with a centered LEAVE.
+	# Row 1 (y=-0.06, 0.11 m below — clears the 0.095 m poke-sphere minimum
+	# even though START and LEAVE ARE simultaneously visible): START RACE.
+	var btn_box := Vector3(0.19, 0.06, 0.02)
+	var col_x := 0.115
+	var host_e := _add_poke_button(root, Vector3(-col_x, 0.05, 0.012), "HOST",
+		Color(0.10, 0.30, 0.14), Color(0.25, 0.95, 0.45), _race_gp_host, btn_box, 0.5)
+	var join_e := _add_poke_button(root, Vector3(col_x, 0.05, 0.012), "JOIN",
+		Color(0.10, 0.20, 0.34), Color(0.30, 0.65, 1.0), _race_gp_join, btn_box, 0.5)
+	var leave_e := _add_poke_button(root, Vector3(0, 0.05, 0.012), "LEAVE",
+		Color(0.34, 0.10, 0.10), Color(1.0, 0.35, 0.35), _race_gp_leave, btn_box, 0.5)
+	var start_e := _add_poke_button(root, Vector3(0, -0.06, 0.012), "START\nRACE",
+		Color(0.30, 0.24, 0.05), Color(1.0, 0.80, 0.20), _race_gp_start_race,
+		Vector3(0.30, 0.075, 0.02), 1.0)
+
+	_race_host_btn = host_e["node"]
+	_race_join_btn = join_e["node"]
+	_race_leave_btn = leave_e["node"]
+	_race_start_btn_node = start_e["node"]
+
+	_race_rows_label = _panel_label("", 14, Color(0.85, 0.92, 1.0, 0.95), 4)
+	_race_rows_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_race_rows_label.position = Vector3(-size_x * 0.5 + 0.04, -0.16, 0.006)
+	root.add_child(_race_rows_label)
+
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(size_x, size_y, 0.03)
+	cs.shape = box
+	root.add_child(cs)
+	_register_grabbable(root)
+
+	_race_update_button_visibility()
+
+# --- Button callbacks ---------------------------------------------------
+func _race_gp_host() -> void:
+	if _race_hosting or _race_client or _race_searching or _race_relay_connecting or _race_relay_up:
+		return
+	_race_scores.clear()
+	_race_peer = ENetMultiplayerPeer.new()
+	var err := _race_peer.create_server(RACE_PORT, 8)
+	if err != OK:
+		_race_set_status("HOST FAILED (%d)" % err)
+		_race_peer = null
+		return
+	_race_hosting = true
+	_race_enet_up = true
+	multiplayer.multiplayer_peer = _race_peer
+	_race_beacon = PacketPeerUDP.new()
+	_race_beacon.set_broadcast_enabled(true)
+	_race_beacon.set_dest_address("255.255.255.255", RACE_BCAST_PORT)
+	_race_beacon_t = 0.0
+	_race_host_relay_wait_t = RACE_HOST_RELAY_DELAY
+	_apply_score(_player_initials, 0)
+	_race_set_status("HOSTING (LAN) — waiting for a racer")
+	_race_update_button_visibility()
+
+func _race_gp_join() -> void:
+	if _race_hosting or _race_client or _race_searching or _race_relay_connecting or _race_relay_up:
+		return
+	_race_client = true
+	_race_searching = true
+	_race_listen = PacketPeerUDP.new()
+	_race_listen.bind(RACE_BCAST_PORT)
+	_race_search_t = RACE_LAN_SEARCH_TIMEOUT
+	_apply_score(_player_initials, 0)
+	_race_set_status("SEARCHING (LAN)…")
+	_race_update_button_visibility()
+
+func _race_gp_leave() -> void:
+	_race_hosting = false
+	_race_client = false
+	_race_searching = false
+	_race_enet_up = false
+	_race_countdown_active = false
+	_race_mode = false
+	if _race_peer != null:
+		multiplayer.multiplayer_peer = null
+		_race_peer = null
+	if _race_beacon != null:
+		_race_beacon.close(); _race_beacon = null
+	if _race_listen != null:
+		_race_listen.close(); _race_listen = null
+	if _race_relay != null:
+		_race_relay.close()
+		_race_relay = null
+	_race_relay_up = false
+	_race_relay_connecting = false
+	_race_relay_peer_joined = false
+	_race_relay_id = ""
+	_race_scores.clear()
+	if _race_rows_label != null:
+		_race_rows_label.text = ""
+	_race_set_status("IDLE")
+	_race_update_button_visibility()
+
+# Host-only: broadcast the synced start signal. Every racer (including the
+# host, via RPC call_local or a direct _apply_race_start call) then counts
+# down 3-2-1 LOCALLY against the shared wall-clock timestamp — see the
+# _race_countdown_active block in _race_process. Nothing about the countdown
+# itself is streamed, only this one "go at this time" message.
+func _race_gp_start_race() -> void:
+	if not _race_hosting or _race_countdown_active or _timer_active or _race_mode:
+		return
+	if not _race_has_any_peer():
+		return
+	var at_ms := int(Time.get_unix_time_from_system() * 1000.0) + RACE_COUNTDOWN_MS
+	_race_do_start(at_ms)
+
+func _race_do_start(at_ms: int) -> void:
+	if _race_enet_up:
+		s_race_start.rpc(at_ms)   # call_local ⇒ also applies here
+	else:
+		_apply_race_start(at_ms)  # no ENet call_local path — apply directly
+	if _race_relay_up:
+		_race_relay_send({"type": "race_start", "at_ms": at_ms})
+
+# --- Shared apply functions (fed by both the RPCs and the relay) -----------
+func _apply_race_start(at_ms: int) -> void:
+	_race_scores.clear()
+	_apply_score(_player_initials, 0)
+	_race_countdown_active = true
+	_race_countdown_at_ms = at_ms
+	_race_countdown_last_shown = 999
+	_race_mode = false
+	_race_set_status("RACE STARTING…")
+	_race_update_start_button_visibility()
+
+func _apply_score(tag: String, score: int) -> void:
+	_race_scores[tag] = score
+	_race_refresh_rows_label()
+
+func _apply_leaderboard(rows: Array) -> void:
+	for r in rows:
+		if r is Dictionary and r.has("tag") and r.has("score"):
+			_race_scores[String(r["tag"])] = int(r["score"])
+	_race_refresh_rows_label()
+
+func _race_sorted_rows() -> Array:
+	var rows: Array = []
+	for tag in _race_scores.keys():
+		rows.append({"tag": tag, "score": int(_race_scores[tag])})
+	rows.sort_custom(func(a, b): return int(a["score"]) > int(b["score"]))
+	return rows
+
+func _race_refresh_rows_label() -> void:
+	if _race_rows_label == null:
+		return
+	var rows := _race_sorted_rows()
+	var txt := ""
+	for i in range(rows.size()):
+		var r: Dictionary = rows[i]
+		txt += "%d. %s  %d\n" % [i + 1, r["tag"], r["score"]]
+	_race_rows_label.text = txt
+
+# Host aggregates every c_score RPC / relay "score" message into _race_scores
+# and re-broadcasts the merged standings so LAN clients (who never see each
+# other directly, only the host) and relay peers stay in sync.
+func _race_broadcast_leaderboard() -> void:
+	var rows := _race_sorted_rows()
+	if _race_enet_up and _race_hosting:
+		s_leaderboard.rpc(rows)
+	if _race_relay_up:
+		_race_relay_send({"type": "leaderboard", "rows": rows})
+
+func _race_broadcast_my_score() -> void:
+	if _race_enet_up:
+		if _race_hosting:
+			_apply_score(_player_initials, _round_score)
+			_race_broadcast_leaderboard()
+		else:
+			c_score.rpc_id(1, _player_initials, _round_score)
+	if _race_relay_up:
+		_apply_score(_player_initials, _round_score)
+		_race_relay_send({"type": "score", "tag": _player_initials, "score": _round_score})
+
+func _race_finish_round(final_score: int) -> void:
+	_race_mode = false
+	_apply_score(_player_initials, final_score)
+	_race_broadcast_my_score()
+	_race_set_status("RACE OVER — final scores")
+	_race_update_start_button_visibility()
+	# Brief grace window so the other racer(s)' final score has time to arrive
+	# before we freeze the displayed standings.
+	await get_tree().create_timer(1.5).timeout
+	_race_show_final_standings()
+
+func _race_show_final_standings() -> void:
+	_race_refresh_rows_label()
+	_race_set_status("RACE RESULTS — poke START RACE for a rematch")
+
+func _race_show_countdown_number(txt: String) -> void:
+	var cam := get_viewport().get_camera_3d()
+	var pos := Vector3(0, 1.6, -0.9)
+	if cam != null:
+		pos = cam.global_position + cam.global_transform.basis.z * -0.9 + Vector3(0, -0.05, 0)
+	BigScorePopup3D.spawn(self, pos, txt)
+	_push_sweep(500.0, 900.0, 0.12)
+
+# --- Per-frame driver (LAN beacon/search, relay poll, countdown tick) -------
+func _race_process(delta: float) -> void:
+	# Host: broadcast a LAN presence beacon once/sec while nobody's connected yet.
+	if _race_hosting and _race_beacon != null:
+		_race_beacon_t -= delta
+		if _race_beacon_t <= 0.0:
+			_race_beacon_t = 1.0
+			_race_beacon.put_packet(("CASCADE_RACE_HOST|%s" % _player_initials).to_utf8_buffer())
+	# Host: fall back to ALSO opening the relay if no LAN client has shown up.
+	if _race_hosting and _race_host_relay_wait_t > 0.0:
+		_race_host_relay_wait_t -= delta
+		if _race_host_relay_wait_t <= 0.0 and not _race_relay_up and not _race_relay_connecting \
+				and multiplayer.get_peers().is_empty():
+			_race_relay_connect()
+
+	# Client: listen for the beacon; fall back to the relay after the timeout.
+	if _race_searching:
+		if _race_listen != null and _race_listen.get_available_packet_count() > 0:
+			var pkt := _race_listen.get_packet().get_string_from_utf8()
+			var ip := _race_listen.get_packet_ip()
+			if pkt.begins_with("CASCADE_RACE_HOST"):
+				_race_listen.close(); _race_listen = null
+				_race_searching = false
+				_race_peer = ENetMultiplayerPeer.new()
+				_race_peer.create_client(ip, RACE_PORT)
+				multiplayer.multiplayer_peer = _race_peer
+				_race_set_status("JOINING (LAN)…")
+		else:
+			_race_search_t -= delta
+			if _race_search_t <= 0.0:
+				if _race_listen != null:
+					_race_listen.close(); _race_listen = null
+				_race_searching = false
+				_race_relay_connect()
+
+	_race_relay_poll(delta)
+
+	# Countdown: every peer computes its own remaining time against the shared
+	# wall-clock target, so nothing about the countdown itself crosses the wire.
+	if _race_countdown_active:
+		var now_ms := int(Time.get_unix_time_from_system() * 1000.0)
+		var remaining_ms := _race_countdown_at_ms - now_ms
+		var secs := int(ceil(remaining_ms / 1000.0))
+		if secs != _race_countdown_last_shown and secs > 0 and secs <= 3:
+			_race_countdown_last_shown = secs
+			_race_show_countdown_number(str(secs))
+		if remaining_ms <= 0:
+			_race_countdown_active = false
+			_race_mode = true
+			_race_score_bcast_t = 0.0
+			_start_round()
+			_race_show_countdown_number("GO!")
+			_race_set_status("RACING…")
+			_race_update_start_button_visibility()
+
+# --- ENet multiplayer signal handlers ---------------------------------------
+func _on_race_peer_connected(_id: int) -> void:
+	if _race_hosting:
+		_race_set_status("PLAYER JOINED (LAN) — ready to start")
+		_race_update_start_button_visibility()
+
+func _on_race_peer_disconnected(_id: int) -> void:
+	if _race_hosting:
+		_race_set_status("PLAYER LEFT")
+		_race_update_start_button_visibility()
+
+func _on_race_connected_to_server() -> void:
+	if _race_client:
+		_race_enet_up = true
+		_race_set_status("CONNECTED (LAN) — waiting for host to start")
+		_race_update_button_visibility()
+
+func _on_race_connection_failed() -> void:
+	if _race_client and not _race_enet_up:
+		multiplayer.multiplayer_peer = null
+		_race_peer = null
+		_race_set_status("LAN CONNECT FAILED — trying relay")
+		_race_relay_connect()
+
+func _on_race_server_disconnected() -> void:
+	if _race_client:
+		_race_enet_up = false
+		multiplayer.multiplayer_peer = null
+		_race_peer = null
+		_race_set_status("HOST DISCONNECTED")
+		_race_update_button_visibility()
+
+# --- RPCs (ENet path) --------------------------------------------------------
+@rpc("authority", "call_local", "reliable")
+func s_race_start(at_ms: int) -> void:
+	_apply_race_start(at_ms)
+
+# any_peer: a non-authority client is the caller (via c_score.rpc_id(1, ...));
+# only the host acts on it — a stray call arriving anywhere else is a no-op.
+@rpc("any_peer", "reliable")
+func c_score(tag: String, score: int) -> void:
+	if not _race_hosting:
+		return
+	_apply_score(tag, score)
+	_race_broadcast_leaderboard()
+
+@rpc("authority", "call_local", "unreliable_ordered")
+func s_leaderboard(rows: Array) -> void:
+	_apply_leaderboard(rows)
+
+# --- Relay transport (WAN fallback, reuses the deployed Tank Commander DO) --
+func _race_relay_connect() -> void:
+	if _race_relay != null:
+		return
+	_race_relay = WebSocketPeer.new()
+	var err := _race_relay.connect_to_url(RACE_RELAY_URL)
+	if err != OK:
+		_race_relay = null
+		_race_set_status("RELAY FAILED (%d)" % err)
+		return
+	_race_relay_connecting = true
+	_race_set_status("CONNECTING (relay)…")
+	_race_update_button_visibility()
+
+# Pure-broadcast relay, no server authority: every peer sends its own effect
+# with "echo": false (see _race_relay_send) and applies it locally FIRST, so
+# receipt here is always something that happened on the OTHER socket.
+func _race_relay_recv(msg: Dictionary) -> void:
+	var t := String(msg.get("type", ""))
+	match t:
+		"welcome":
+			_race_relay_id = String(msg.get("id", ""))
+			var roster: Array = msg.get("roster", [])
+			_race_relay_peer_joined = roster.size() > 0
+			_race_set_status("CONNECTED (relay) — waiting for host to start" if not _race_hosting \
+				else "CONNECTED (relay) — waiting for a racer")
+			_race_update_start_button_visibility()
+		"join":
+			_race_relay_peer_joined = true
+			_race_set_status("PLAYER JOINED (relay) — ready to start" if _race_hosting else "PLAYER JOINED (relay)")
+			_race_update_start_button_visibility()
+		"full":
+			_race_set_status("RELAY ROOM FULL — try again later")
+		"race_start":
+			_apply_race_start(int(msg.get("at_ms", 0)))
+		"score":
+			_apply_score(String(msg.get("tag", "?")), int(msg.get("score", 0)))
+		"leaderboard":
+			_apply_leaderboard(msg.get("rows", []))
+		"leave", "host_left":
+			_race_relay_peer_joined = false
+			_race_set_status("OTHER PLAYER LEFT")
+			_race_update_start_button_visibility()
+		_:
+			pass
+
+func _race_relay_send(d: Dictionary) -> void:
+	if _race_relay != null and _race_relay.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		var out := d.duplicate()
+		out["echo"] = false   # we already applied this locally — never boomerang it back
+		_race_relay.send_text(JSON.stringify(out))
+
+func _race_relay_poll(_delta: float) -> void:
+	if _race_relay == null:
+		return
+	_race_relay.poll()
+	var state := _race_relay.get_ready_state()
+	if state == WebSocketPeer.STATE_OPEN:
+		if _race_relay_connecting:
+			_race_relay_connecting = false
+			_race_relay_up = true
+			_race_set_status("CONNECTED (relay)")
+			_race_update_button_visibility()
+		while _race_relay.get_available_packet_count() > 0:
+			var pkt := _race_relay.get_packet().get_string_from_utf8()
+			var msg = JSON.parse_string(pkt)
+			if msg is Dictionary:
+				_race_relay_recv(msg)
+	elif state == WebSocketPeer.STATE_CLOSED:
+		if _race_relay_up or _race_relay_connecting:
+			_race_set_status("RELAY DISCONNECTED")
+		_race_relay = null
+		_race_relay_up = false
+		_race_relay_connecting = false
+		_race_update_button_visibility()
