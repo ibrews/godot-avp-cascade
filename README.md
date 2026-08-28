@@ -51,7 +51,7 @@ Verified working **2026-06-01** on Apple Vision Pro M2 (visionOS 26.5, RealityDe
 - Mixed immersion (passthrough) — cubes composite into your real room
 - **Pinch-to-grab and throw** any cube with either hand — grab-by-point, anchored to the de-spiked thumb tip
 - **Two-hand pinch to scale + rotate** any object, or the whole world via the floating chrome handle
-- One grabbable **control panel** (HANDS / START / MUTE / GESTURES / SKY / RESET) + a 30 s time-attack with a procedural soundtrack and a **global top-20 leaderboard** — set your own **3-letter tag** on the grabbable **YOUR TAG** panel (poke ▲/▼) so your scores post under your name, not a shared default
+- One grabbable **control panel** (HANDS / START / MUTE / GESTURES / SKY / RESET) + a 30 s time-attack with a procedural soundtrack and a **global top-20 leaderboard** — set your own **3-letter tag** on the grabbable **YOUR TAG** panel (poke letters on the A-Z keyboard) so your scores post under your name, not a shared default
 - System wrist/Home menu hidden for uninterrupted immersion via the `GodotPersistentSystemOverlays` Info.plist key (build 7)
 
 ## What Cascade Countdown proves

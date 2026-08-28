@@ -193,7 +193,7 @@ Sources: [Apple screenshot specifications](https://developer.apple.com/help/app-
 | 2 | Two-hand world-scaling via chrome handle, room visible | Shows the "passthrough into your room" hook |
 | 3 | START countdown active, score visible, multiple cubes airborne | Time-attack mode legibility |
 | 4 | Leaderboard panel grabbed close to viewer, top scores visible | Social/competitive hook |
-| 5 | YOUR TAG panel mid-interaction (poke ▲/▼ on a letter) | Shows depth of interaction |
+| 5 | YOUR TAG panel mid-interaction (poking a letter on the A-Z keyboard) | Shows depth of interaction |
 | 6 | Celebration moment — fanfare after beating personal best | Emotional payoff |
 
 ## App Preview Video
