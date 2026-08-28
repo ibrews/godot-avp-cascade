@@ -262,12 +262,15 @@ const ROUND_SECONDS := 30.0
 const LEADERBOARD_URL := "https://script.google.com/macros/s/AKfycbzfnTbrGnRE0ANAVujqDWRyYi_eub7HOvS-m3uI3WY-ysMw0LohX3d48iyE7D86jn5R/exec"
 const LEADERBOARD_KEY := "cascade-2026"   # must match Code.gs APP_KEY
 # Player tag posted with each score. Set in-world via the grabbable "YOUR TAG"
-# picker (3 slots, poke ▲/▼ to cycle A–Z); persisted to user://initials.txt.
-# Defaults to AAA until the player sets it, so the global leaderboard fills with
-# distinct names instead of everyone showing the same hardcoded tag.
+# picker (3 slots, poke the letter you want on an A-Z keyboard — each poke fills
+# the active slot and auto-advances, arcade-initials style); persisted to
+# user://initials.txt. Defaults to AAA until the player sets it, so the global
+# leaderboard fills with distinct names instead of everyone showing the same tag.
 var _player_initials := "AAA"
 var _initials_chars: Array[int] = [0, 0, 0]    # A=0 … Z=25, one per slot
 var _tag_letter_labels: Array[Label3D] = []    # the 3 big letters on the picker
+var _tag_slot_underlines: Array[MeshInstance3D] = []  # highlights which slot pokes next
+var _active_tag_slot := 0                      # which of the 3 slots the next letter-poke fills
 var _timer_active := false
 var _timer_remaining := 0.0
 var _round_score := 0
@@ -2660,23 +2663,31 @@ func _initials_string() -> String:
 func _refresh_tag_labels() -> void:
 	for k in range(_tag_letter_labels.size()):
 		var lbl: Label3D = _tag_letter_labels[k]
-		if lbl != null and k < _initials_chars.size():
-			lbl.text = char(65 + int(_initials_chars[k]))
+		if lbl == null or k >= _initials_chars.size():
+			continue
+		lbl.text = char(65 + int(_initials_chars[k]))
+		# Bright = this slot fills next; dim = already set. Same idea as a text-cursor.
+		lbl.modulate = Color(1.0, 1.0, 1.0, 1.0) if k == _active_tag_slot else Color(0.55, 0.60, 0.64, 0.85)
+	for k in range(_tag_slot_underlines.size()):
+		var u: MeshInstance3D = _tag_slot_underlines[k]
+		if u != null:
+			u.visible = (k == _active_tag_slot)
 
-# Poke-▲/▼ callback for letter slot `slot` (0..2), cycling A–Z by `dir` (+1/-1).
-# Auto-saves so the tag persists; the next round's score posts under it.
-func _cycle_tag(slot: int, dir: int) -> void:
-	if slot < 0 or slot >= _initials_chars.size():
-		return
-	_initials_chars[slot] = (int(_initials_chars[slot]) + dir + 26) % 26
+# Poke callback for keyboard letter `letter_idx` (A=0 … Z=25): fills the active
+# slot and auto-advances to the next one (wrapping after slot 2), arcade-initials
+# style — poke three letters in a row to spell the whole tag. Auto-saves so it
+# persists; the next round's score posts under it.
+func _poke_tag_letter(letter_idx: int) -> void:
+	_initials_chars[_active_tag_slot] = letter_idx
+	_active_tag_slot = (_active_tag_slot + 1) % _initials_chars.size()
 	_player_initials = _initials_string()
 	_refresh_tag_labels()
 	_save_initials()
 
-# Grabbable "YOUR TAG" panel: three letter slots, each with a poke-▲ and poke-▼
-# to cycle A–Z. Same look/behaviour as the other panels. No destruct button (it
-# stays available like the control panel, and a clear ▼ row avoids poke-sphere
-# overlap with a destruct button at the panel bottom).
+# Grabbable "YOUR TAG" panel: three letter slots (the active one highlighted)
+# above an A-Z keyboard grid — poke a letter to set the active slot and advance,
+# same look/behaviour as the other panels. No destruct button (stays available
+# like the control panel).
 func _build_initials_panel() -> void:
 	var root := PickupAbleBody3D.new()
 	root.name = "TagPanel"
@@ -2688,8 +2699,8 @@ func _build_initials_panel() -> void:
 	root.freeze_on_release = true
 	add_child(root)
 
-	var size_x := 0.40
-	var size_y := 0.32
+	var size_x := 0.72
+	var size_y := 0.64
 
 	var accent_mat := StandardMaterial3D.new()
 	accent_mat.albedo_color = Color(0.30, 0.95, 0.80, 0.30)
@@ -2719,25 +2730,58 @@ func _build_initials_panel() -> void:
 	var title := _panel_label("◆ YOUR TAG ◆", 24, Color(0.40, 1.0, 0.85, 1.0), 7)
 	title.position = Vector3(0, size_y * 0.5 - 0.032, 0.006)
 	root.add_child(title)
-	var hint := _panel_label("poke ▲ / ▼ to set your initials", 12, Color(0.80, 0.96, 0.90, 0.92), 4)
+	var hint := _panel_label("poke letters to spell your initials", 12, Color(0.80, 0.96, 0.90, 0.92), 4)
 	hint.position = Vector3(0, size_y * 0.5 - 0.070, 0.006)
 	root.add_child(hint)
 
+	# The 3 slots + their "type here next" underline, no buttons — direct letter
+	# pokes below are what changes them now.
 	_tag_letter_labels.clear()
-	var col_x: Array[float] = [-0.12, 0.0, 0.12]
-	var btn_box := Vector3(0.075, 0.05, 0.02)
-	var b_base := Color(0.10, 0.34, 0.30)
-	var b_emis := Color(0.25, 0.95, 0.80)
+	_tag_slot_underlines.clear()
+	var slot_y := 0.12
+	var slot_col_x: Array[float] = [-0.12, 0.0, 0.12]
+	var under_mat := StandardMaterial3D.new()
+	under_mat.albedo_color = Color(0.40, 1.0, 0.85, 0.9)
+	under_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	under_mat.emission_enabled = true
+	under_mat.emission = Color(0.40, 1.0, 0.85)
 	for k in range(3):
-		var cx: float = col_x[k]
-		_add_poke_button(root, Vector3(cx, 0.020, 0.012), "▲", b_base, b_emis,
-			_cycle_tag.bind(k, 1), btn_box, 0.22)
+		var scx: float = slot_col_x[k]
 		var letter := _panel_label("A", 56, Color(1.0, 1.0, 1.0, 1.0), 8)
-		letter.position = Vector3(cx, -0.058, 0.006)
+		letter.position = Vector3(scx, slot_y, 0.006)
 		root.add_child(letter)
 		_tag_letter_labels.append(letter)
-		_add_poke_button(root, Vector3(cx, -0.128, 0.012), "▼", b_base, b_emis,
-			_cycle_tag.bind(k, -1), btn_box, 0.22)
+		var under := MeshInstance3D.new()
+		var uq := QuadMesh.new()
+		uq.size = Vector2(0.075, 0.008)
+		under.mesh = uq
+		under.material_override = under_mat
+		under.position = Vector3(scx, slot_y - 0.055, 0.006)
+		root.add_child(under)
+		_tag_slot_underlines.append(under)
+
+	# A-Z keyboard, 7 columns x 4 rows (last row centred with 5 letters) — one
+	# poke button per letter. Poke hit-test is a fixed 0.045 activation radius
+	# per button, independent of visual box size, so centres must stay >= 0.095
+	# apart (2x radius) or neighbouring letters double-fire — see the documented
+	# gotcha in godot-avp-poke-button-panel.md. 0.095 spacing in both axes here.
+	const ALPHABET := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	var col_x7: Array[float] = [-0.285, -0.190, -0.095, 0.0, 0.095, 0.190, 0.285]
+	var key_box := Vector3(0.075, 0.065, 0.02)
+	var k_base := Color(0.10, 0.34, 0.30)
+	var k_emis := Color(0.25, 0.95, 0.80)
+	var row0_y := 0.00
+	var row_spacing := 0.095
+	var li := 0
+	for row in range(4):
+		var row_y: float = row0_y - row * row_spacing
+		var row_len: int = 7 if row < 3 else 5
+		var row_cols: Array[float] = col_x7 if row_len == 7 else col_x7.slice(1, 6)
+		for c in range(row_len):
+			var letter_idx := li
+			_add_poke_button(root, Vector3(row_cols[c], row_y, 0.012), ALPHABET[li],
+				k_base, k_emis, _poke_tag_letter.bind(letter_idx), key_box, 0.35)
+			li += 1
 	_refresh_tag_labels()
 
 	var cs := CollisionShape3D.new()
