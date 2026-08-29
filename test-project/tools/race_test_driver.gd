@@ -24,6 +24,9 @@ var acted := false
 var start_sent := false
 var score_accum_t := 0.0
 var status_t := 0.0
+var was_countdown_active := false
+var go_wall_ms := -1.0       # this process's own Time.get_unix_time_from_system() at GO
+var go_target_ms := -1       # the at_ms target this process received (_race_countdown_at_ms)
 const TEST_TIMEOUT := 55.0
 
 func _initialize() -> void:
@@ -80,6 +83,18 @@ func _process(delta: float) -> bool:
 		print("[TEST host] peer detected @ t=%.1f — triggering START RACE" % t)
 		main._race_gp_start_race()
 
+	# Identity-case capture: the exact wall-clock instant THIS process actually
+	# started racing, plus the shared at_ms target it counted down against.
+	# Comparing these two numbers across the host/client logs after the run is
+	# the real test that synced start syncs — not "the printed status looked
+	# right a second later."
+	if was_countdown_active and not main._race_countdown_active and main._race_mode and go_wall_ms < 0.0:
+		go_wall_ms = Time.get_unix_time_from_system() * 1000.0
+		go_target_ms = main._race_countdown_at_ms
+		print("[TEST %s] GO at wall_ms=%.1f target_at_ms=%d (delta_from_target=%.1fms)" % [
+			role, go_wall_ms, go_target_ms, go_wall_ms - float(go_target_ms)])
+	was_countdown_active = main._race_countdown_active
+
 	if main._race_mode:
 		score_accum_t += delta
 		if score_accum_t > 0.7:
@@ -100,6 +115,7 @@ func _process(delta: float) -> bool:
 			remote_cubes, str(remote_lh), str(head_seen)])
 
 	if t > TEST_TIMEOUT:
-		print("[TEST %s] FINAL round_score=%d scores=%s" % [role, main._round_score, str(main._race_scores)])
+		print("[TEST %s] FINAL round_score=%d scores=%s go_wall_ms=%.1f go_target_ms=%d" % [
+			role, main._round_score, str(main._race_scores), go_wall_ms, go_target_ms])
 		return true
 	return false
