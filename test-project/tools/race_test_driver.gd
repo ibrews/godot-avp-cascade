@@ -37,7 +37,23 @@ func _initialize() -> void:
 	var tag := OS.get_environment("TAG")
 	if tag != "":
 		main._apply_initials(tag)
+	# Headless has no real OpenXR hand tracking, so no /user/hand_tracker/*
+	# trackers exist at all — inject fake ones so _race_collect_hand_joints()
+	# has real data to pick up, exercising the actual hand-state wire path.
+	_inject_fake_hand("left")
+	_inject_fake_hand("right")
 	print("[TEST %s] instantiated main scene (force_relay=%s tag=%s)" % [role, str(force_relay), main._player_initials])
+
+func _inject_fake_hand(side: String) -> void:
+	var tname := "/user/hand_tracker/" + side
+	var t := XRHandTracker.new()
+	t.name = tname
+	XRServer.add_tracker(t)
+	t.has_tracking_data = true
+	var base := Vector3(0.2 if side == "right" else -0.2, 1.2, -0.4)
+	for j in range(26):
+		t.set_hand_joint_transform(j, Transform3D(Basis.IDENTITY, base + Vector3(0.0, j * 0.003, 0.0)))
+		t.set_hand_joint_flags(j, 8)
 
 func _process(delta: float) -> bool:
 	t += delta
@@ -74,9 +90,14 @@ func _process(delta: float) -> bool:
 	if status_t > 1.0:
 		status_t = 0.0
 		var status_txt: String = str(main._race_status_label.text) if main._race_status_label != null else "?"
-		print("[TEST %s] t=%.1f status='%s' round_score=%d race_mode=%s countdown=%s scores=%s" % [
+		var remote_cubes: int = main._race_ghost_cubes.size()
+		var remote_lh: bool = main._race_remote_hand_trackers.get("left") != null \
+			and (main._race_remote_hand_trackers["left"] as XRHandTracker).get_has_tracking_data()
+		var head_seen: bool = main._race_remote_head_mesh != null and main._race_remote_head_mesh.visible
+		print("[TEST %s] t=%.1f status='%s' round_score=%d race_mode=%s countdown=%s scores=%s remote_cubes=%d remote_lh=%s remote_head=%s" % [
 			role, t, status_txt, main._round_score, str(main._race_mode),
-			str(main._race_countdown_active), str(main._race_scores)])
+			str(main._race_countdown_active), str(main._race_scores),
+			remote_cubes, str(remote_lh), str(head_seen)])
 
 	if t > TEST_TIMEOUT:
 		print("[TEST %s] FINAL round_score=%d scores=%s" % [role, main._round_score, str(main._race_scores)])

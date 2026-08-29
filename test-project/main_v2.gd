@@ -11,7 +11,7 @@ extends Node3D
 #   ring→thumb   = reset everything       pinky→thumb  = toggle sky (immersion / passthrough)
 
 # Shown on the in-world info panel; bump on meaningful releases. (Full changelog lives in git log.)
-const APP_VERSION := "v0.9.37-race"
+const APP_VERSION := "v0.9.37-ghostracer"
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -359,6 +359,25 @@ var _race_host_btn: Node3D
 var _race_join_btn: Node3D
 var _race_leave_btn: Node3D
 var _race_start_btn_node: Node3D
+
+# --- Remote-player visualization ("see what the other racer is doing") ------
+# Each racer streams their own head + hand pose and live cube positions;
+# receivers render a rigid-offset ghost copy — their hands, head, and falling
+# pieces — next to their own play space. No shared coordinate space, no
+# physics/transform authority: purely a cosmetic mirror driven by periodic
+# state snapshots. See the "MULTIPLAYER RACE" section for the implementation.
+const REMOTE_STATE_HZ := 8.0
+const REMOTE_OFFSET := Vector3(1.8, 0.0, 0.0)   # "their side" — clear of every panel's ±0.5m
+const REMOTE_STALE_MS := 2500                   # no update this long → hide the ghost racer
+const REMOTE_CUBE_LERP_RATE := 10.0             # per-second lerp toward the last received cube pos
+
+var _race_state_bcast_t := 0.0
+var _race_remote_container: Node3D
+var _race_remote_head_mesh: MeshInstance3D
+var _race_remote_hand_trackers := {}   # "left"/"right" -> XRHandTracker (synthetic, network-fed)
+var _race_remote_hand_drivers := {}    # "left"/"right" -> HandMeshDriver3D
+var _race_ghost_cubes := {}            # cube id (String) -> MeshInstance3D
+var _race_remote_last_update_ms := {}  # tag -> Time.get_ticks_msec() of last state received
 
 # ============================================================================
 # LIFECYCLE & XR INIT
@@ -3565,6 +3584,7 @@ func _race_gp_leave() -> void:
 	_race_relay_peer_joined = false
 	_race_relay_id = ""
 	_race_scores.clear()
+	_race_clear_remote_visuals()
 	if _race_rows_label != null:
 		_race_rows_label.text = ""
 	_race_set_status("IDLE")
@@ -3595,6 +3615,7 @@ func _race_do_start(at_ms: int) -> void:
 func _apply_race_start(at_ms: int) -> void:
 	_race_scores.clear()
 	_apply_score(_player_initials, 0)
+	_race_clear_remote_visuals()   # drop any leftover ghost racer from a previous race
 	_race_countdown_active = true
 	_race_countdown_at_ms = at_ms
 	_race_countdown_last_shown = 999
@@ -3649,6 +3670,244 @@ func _race_broadcast_my_score() -> void:
 	if _race_relay_up:
 		_apply_score(_player_initials, _round_score)
 		_race_relay_send({"type": "score", "tag": _player_initials, "score": _round_score})
+
+# --- Remote-ghost-racer state: build/send my own snapshot -------------------
+# One head transform, up to two hands' worth of 26 joint transforms (null = not
+# currently tracked), and every currently-active cube's position/color/shape —
+# everything needed for a receiver to render a rigid-offset ghost copy of what
+# I'm doing right now. Positions are WORLD-space in MY OWN session (there's no
+# shared coordinate space), so the receiver adds a fixed offset, not an anchor.
+func _race_build_state_payload() -> Dictionary:
+	var cam := get_viewport().get_camera_3d()
+	var head_p := Vector3.ZERO
+	var head_q := Quaternion.IDENTITY
+	if cam != null:
+		head_p = cam.global_position
+		head_q = cam.global_transform.basis.get_rotation_quaternion()
+	var cubes: Array = []
+	for c in _active_cubes:
+		if not is_instance_valid(c):
+			continue
+		var col := Color.WHITE
+		var mesh_node: Node = c.get_node_or_null("Mesh")
+		if mesh_node is MeshInstance3D and (mesh_node as MeshInstance3D).material_override is StandardMaterial3D:
+			col = ((mesh_node as MeshInstance3D).material_override as StandardMaterial3D).albedo_color
+		cubes.append({
+			"id": str(c.get_instance_id()),
+			"p": [c.global_position.x, c.global_position.y, c.global_position.z],
+			"c": [col.r, col.g, col.b],
+			"s": float(c.get_meta("size", 0.09)),
+			"sph": c.is_in_group("sphere"),
+		})
+	return {
+		"head": {"p": [head_p.x, head_p.y, head_p.z], "q": [head_q.x, head_q.y, head_q.z, head_q.w]},
+		"lh": _race_collect_hand_joints("left_hand"),
+		"rh": _race_collect_hand_joints("right_hand"),
+		"cubes": cubes,
+	}
+
+# All 26 joints' WORLD-space transforms for one of MY hands, or null if that
+# hand has no tracking data at all right now. Per-joint null = untracked.
+func _race_collect_hand_joints(side: String) -> Variant:
+	var tname := "/user/hand_tracker/" + ("left" if side == "left_hand" else "right")
+	var ht := XRServer.get_tracker(tname) as XRHandTracker
+	if ht == null or not ht.get_has_tracking_data():
+		return null
+	var origin_xf: Transform3D = ($XROrigin3D as Node3D).global_transform
+	var joints: Array = []
+	joints.resize(26)
+	for j in range(26):
+		if not (int(ht.get_hand_joint_flags(j)) & 8):  # POSITION_TRACKED
+			joints[j] = null
+			continue
+		var wt := origin_xf * ht.get_hand_joint_transform(j)
+		var q := wt.basis.get_rotation_quaternion()
+		joints[j] = [wt.origin.x, wt.origin.y, wt.origin.z, q.x, q.y, q.z, q.w]
+	return joints
+
+func _race_broadcast_my_state() -> void:
+	var payload := _race_build_state_payload()
+	if _race_enet_up:
+		if _race_hosting:
+			s_state.rpc(_player_initials, payload)
+		else:
+			c_state.rpc_id(1, _player_initials, payload)
+	if _race_relay_up:
+		# The deployed relay Worker special-cases type "state" — unlike every
+		# other message type (generically stamped + forwarded as-is), "state"
+		# is rebuilt server-side as {type:'state', id, color, s: msg.s} and
+		# only msg.s survives the trip. Nest our real payload under "s" (with
+		# our own tag inside it, since the relay's own id/color aren't ours).
+		payload["tag"] = _player_initials
+		_race_relay_send({"type": "state", "s": payload})
+
+# --- Remote-ghost-racer state: receive + render ------------------------------
+# tag is ALWAYS "the other racer" here: the host's own call_local echo of its
+# own s_state, and the relay's echo:false, both guarantee we never see our own
+# tag come back through this path — but check anyway, cheaply, since a stray
+# self-echo would otherwise render our own hands as a second ghost of ourself.
+func _apply_state(tag: String, payload: Dictionary) -> void:
+	if tag == "" or tag == _player_initials:
+		return
+	_race_ensure_remote_visuals()
+	_race_remote_last_update_ms[tag] = Time.get_ticks_msec()
+	var head = payload.get("head")
+	if head is Dictionary:
+		_race_update_remote_head(head)
+	_race_apply_hand_joints("left", payload.get("lh"))
+	_race_apply_hand_joints("right", payload.get("rh"))
+	_race_update_ghost_cubes(payload.get("cubes", []))
+
+# Lazily build the ghost-racer rig: a plain container (position is irrelevant —
+# see below), a head marker, and two synthetic XRHandTrackers registered with
+# XRServer so the EXISTING HandMeshDriver3D can drive them unmodified. Parented
+# under `self`, NOT under $XROrigin3D, so HandMeshDriver3D._origin_xform() finds
+# no XROrigin3D ancestor and treats the fed transforms as already world-space —
+# which they are, since REMOTE_OFFSET is baked in before _race_apply_hand_joints
+# ever calls set_hand_joint_transform(). (HandMeshDriver3D resolves bone poses
+# via skeleton.global_transform.inverse() * fed_transform, so the container's
+# own position never actually matters — only where it's parented.)
+func _race_ensure_remote_visuals() -> void:
+	if _race_remote_container != null:
+		return
+	_race_remote_container = Node3D.new()
+	_race_remote_container.name = "RemoteRacer"
+	add_child(_race_remote_container)
+	for side in ["left", "right"]:
+		var t := XRHandTracker.new()
+		t.name = "/user/hand_tracker/remote_" + side
+		XRServer.add_tracker(t)
+		_race_remote_hand_trackers[side] = t
+		var driver := HandMeshDriver3D.new()
+		driver.tracker_name = t.name
+		driver.is_left = (side == "left")
+		_race_remote_container.add_child(driver)
+		_race_remote_hand_drivers[side] = driver
+
+func _race_apply_hand_joints(side: String, joints) -> void:
+	var t: XRHandTracker = _race_remote_hand_trackers.get(side)
+	if t == null:
+		return
+	if not (joints is Array):
+		t.has_tracking_data = false
+		return
+	t.has_tracking_data = true
+	for j in range(26):
+		var jd = joints[j] if j < joints.size() else null
+		if not (jd is Array) or jd.size() < 7:
+			t.set_hand_joint_flags(j, 0)
+			continue
+		var p := Vector3(jd[0], jd[1], jd[2]) + REMOTE_OFFSET
+		var q := Quaternion(jd[3], jd[4], jd[5], jd[6])
+		t.set_hand_joint_transform(j, Transform3D(Basis(q), p))
+		t.set_hand_joint_flags(j, 8)
+
+func _race_update_remote_head(head: Dictionary) -> void:
+	var p: Array = head.get("p", [0.0, 0.0, 0.0])
+	var q: Array = head.get("q", [0.0, 0.0, 0.0, 1.0])
+	var pos := Vector3(p[0], p[1], p[2]) + REMOTE_OFFSET
+	var quat := Quaternion(q[0], q[1], q[2], q[3])
+	if _race_remote_head_mesh == null:
+		_race_remote_head_mesh = MeshInstance3D.new()
+		var cap := CapsuleMesh.new()
+		cap.radius = 0.09
+		cap.height = 0.20
+		_race_remote_head_mesh.mesh = cap
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.55, 0.85, 1.0, 0.55)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.emission_enabled = true
+		mat.emission = Color(0.40, 0.80, 1.0)
+		mat.emission_energy_multiplier = 1.4
+		_race_remote_head_mesh.material_override = mat
+		_race_remote_container.add_child(_race_remote_head_mesh)
+	_race_remote_head_mesh.visible = true
+	_race_remote_head_mesh.global_transform = Transform3D(Basis(quat), pos)
+
+# Diff the incoming cube list against known ghosts: spawn new ones, free ones
+# no longer present (scored/despawned on the sender's side), and stash a
+# target position on survivors for _race_update_remote_ghosts to lerp toward
+# every frame (smooths the ~8Hz update rate into continuous motion).
+func _race_update_ghost_cubes(cubes: Array) -> void:
+	var seen := {}
+	for c in cubes:
+		if not (c is Dictionary) or not c.has("id"):
+			continue
+		var id := String(c["id"])
+		seen[id] = true
+		var p: Array = c.get("p", [0.0, 0.0, 0.0])
+		var col_a: Array = c.get("c", [1.0, 1.0, 1.0])
+		var target := Vector3(p[0], p[1], p[2]) + REMOTE_OFFSET
+		var col := Color(col_a[0], col_a[1], col_a[2])
+		var size := float(c.get("s", 0.09))
+		var is_sph := bool(c.get("sph", true))
+		var mi: MeshInstance3D = _race_ghost_cubes.get(id)
+		if mi == null:
+			mi = MeshInstance3D.new()
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.emission_enabled = true
+			mat.emission_energy_multiplier = 1.2
+			mi.material_override = mat
+			_race_remote_container.add_child(mi)
+			_race_ghost_cubes[id] = mi
+			mi.global_position = target   # first sighting: place immediately, no lerp-in from origin
+		# get_meta's (name, default) form still errors when default is null (Godot
+		# treats null==no-default-given) — has_meta() sidesteps that noise.
+		if not mi.has_meta("gc_sph") or mi.get_meta("gc_sph") != is_sph or mi.get_meta("gc_size") != size:
+			if is_sph:
+				var sm := SphereMesh.new()
+				sm.radius = size * 0.5
+				sm.height = size
+				mi.mesh = sm
+			else:
+				var bm := BoxMesh.new()
+				bm.size = Vector3.ONE * size
+				mi.mesh = bm
+			mi.set_meta("gc_sph", is_sph)
+			mi.set_meta("gc_size", size)
+		var mat: StandardMaterial3D = mi.material_override
+		mat.albedo_color = col
+		mat.emission = col
+		mi.set_meta("gc_target", target)
+	for id in _race_ghost_cubes.keys().duplicate():
+		if not seen.has(id):
+			if is_instance_valid(_race_ghost_cubes[id]):
+				_race_ghost_cubes[id].queue_free()
+			_race_ghost_cubes.erase(id)
+
+# Per-frame: lerp every ghost cube toward its last received position, and hide
+# the whole ghost racer if its sender hasn't sent a state update in a while
+# (peer left, or simply isn't racing right now).
+func _race_update_remote_ghosts(delta: float) -> void:
+	for id in _race_ghost_cubes:
+		var mi: MeshInstance3D = _race_ghost_cubes[id]
+		if not is_instance_valid(mi):
+			continue
+		var target: Vector3 = mi.get_meta("gc_target", mi.global_position)
+		mi.global_position = mi.global_position.lerp(target, clampf(delta * REMOTE_CUBE_LERP_RATE, 0.0, 1.0))
+	if _race_remote_last_update_ms.is_empty():
+		return
+	var now_ms := Time.get_ticks_msec()
+	for tag in _race_remote_last_update_ms.keys().duplicate():
+		if now_ms - int(_race_remote_last_update_ms[tag]) > REMOTE_STALE_MS:
+			_race_remote_last_update_ms.erase(tag)
+			_race_clear_remote_visuals()
+
+# Hide the ghost racer entirely (peer left, race ended+left, or a fresh race is
+# starting). Trackers/driver nodes are kept and just marked untracked rather
+# than freed — cheap to leave parked, avoids XRServer churn between races.
+func _race_clear_remote_visuals() -> void:
+	for id in _race_ghost_cubes.keys():
+		if is_instance_valid(_race_ghost_cubes[id]):
+			_race_ghost_cubes[id].queue_free()
+	_race_ghost_cubes.clear()
+	for side in _race_remote_hand_trackers:
+		(_race_remote_hand_trackers[side] as XRHandTracker).has_tracking_data = false
+	if _race_remote_head_mesh != null:
+		_race_remote_head_mesh.visible = false
+	_race_remote_last_update_ms.clear()
 
 func _race_finish_round(final_score: int) -> void:
 	_race_mode = false
@@ -3723,10 +3982,20 @@ func _race_process(delta: float) -> void:
 			_race_countdown_active = false
 			_race_mode = true
 			_race_score_bcast_t = 0.0
+			_race_state_bcast_t = 0.0
 			_start_round()
 			_race_show_countdown_number("GO!")
 			_race_set_status("RACING…")
 			_race_update_start_button_visibility()
+
+	# Stream head/hand/cube state while racing, and lerp+prune the ghost racer
+	# rendered from the LAST peer's incoming state (see _apply_state).
+	if _race_mode:
+		_race_state_bcast_t -= delta
+		if _race_state_bcast_t <= 0.0:
+			_race_state_bcast_t = 1.0 / REMOTE_STATE_HZ
+			_race_broadcast_my_state()
+	_race_update_remote_ghosts(delta)
 
 # --- ENet multiplayer signal handlers ---------------------------------------
 func _on_race_peer_connected(_id: int) -> void:
@@ -3778,6 +4047,22 @@ func c_score(tag: String, score: int) -> void:
 func s_leaderboard(rows: Array) -> void:
 	_apply_leaderboard(rows)
 
+# Head/hand/cube snapshot for the remote-ghost-racer view. Same any_peer→host→
+# rebroadcast shape as c_score/s_leaderboard: a client's c_state reaches only
+# the host, which relays it back out via s_state (call_local, so the host also
+# renders the client's ghost); the host sends its OWN state straight via
+# s_state.rpc(). _apply_state ignores a payload carrying our own tag, so
+# host's call_local echo of its own s_state call is a harmless no-op.
+@rpc("any_peer", "unreliable_ordered")
+func c_state(tag: String, payload: Dictionary) -> void:
+	if not _race_hosting:
+		return
+	s_state.rpc(tag, payload)
+
+@rpc("authority", "call_local", "unreliable_ordered")
+func s_state(tag: String, payload: Dictionary) -> void:
+	_apply_state(tag, payload)
+
 # --- Relay transport (WAN fallback, reuses the deployed Tank Commander DO) --
 func _race_relay_connect() -> void:
 	if _race_relay != null:
@@ -3817,6 +4102,11 @@ func _race_relay_recv(msg: Dictionary) -> void:
 			_apply_score(String(msg.get("tag", "?")), int(msg.get("score", 0)))
 		"leaderboard":
 			_apply_leaderboard(msg.get("rows", []))
+		"state":
+			# Unwrap the relay's hardcoded {type:'state', id, color, s:...}
+			# envelope — see the comment in _race_broadcast_my_state.
+			var s: Dictionary = msg.get("s", {})
+			_apply_state(String(s.get("tag", "?")), s)
 		"leave", "host_left":
 			_race_relay_peer_joined = false
 			_race_set_status("OTHER PLAYER LEFT")
