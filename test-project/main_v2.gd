@@ -361,6 +361,17 @@ var _race_join_btn: Node3D
 var _race_leave_btn: Node3D
 var _race_start_btn_node: Node3D
 
+# Host picker — more than one host can be beaconing on the same LAN at once, so JOIN no longer
+# auto-connects to whichever beacon arrives first. It collects every distinct host heard (keyed by
+# IP, labelled by their 3-letter tag from the beacon payload) into up to RACE_MAX_DISCOVERED slots
+# and shows a pick-one poke button per slot, reusing the HOST/JOIN row + the START RACE row's
+# screen position (both already hidden while client-searching, so there's no layout conflict).
+const RACE_MAX_DISCOVERED := 3
+var _race_discovered_hosts := {}    # ip (String) -> {"tag": String, "last_seen_ms": int}
+var _race_discovery_order: Array = []   # ip, in first-heard order — stable slot -> host mapping
+var _race_picker_btns: Array = []   # 3 poke-button nodes, one per slot
+var _race_picker_labels: Array = [] # matching Label3D refs (so we can relabel with the host's tag)
+
 # --- Remote-player visualization ("see what the other racer is doing") ------
 # Each racer streams their own head + hand pose and live cube positions;
 # receivers render a rigid-offset ghost copy — their hands, head, and falling
@@ -3548,6 +3559,21 @@ func _build_race_panel() -> void:
 	_race_leave_btn = leave_e["node"]
 	_race_start_btn_node = start_e["node"]
 
+	# Host-picker slots — same 3 screen positions as HOST/JOIN/START RACE (mutually exclusive:
+	# hidden until >=1 host is discovered while searching, and HOST/JOIN/START are themselves
+	# already hidden any time we're client-searching). Labeled with each host's 3-letter tag once
+	# discovered; _race_refresh_picker() drives visibility + text.
+	var picker_positions: Array = [Vector3(-col_x, 0.05, 0.012), Vector3(col_x, 0.05, 0.012), Vector3(0, -0.06, 0.012)]
+	_race_picker_btns.clear()
+	_race_picker_labels.clear()
+	for i in range(RACE_MAX_DISCOVERED):
+		var pick_e := _add_poke_button(root, picker_positions[i], "···",
+			Color(0.24, 0.20, 0.05), Color(1.0, 0.85, 0.30), _race_gp_pick_host.bind(i), btn_box, 0.6)
+		var pb: Node3D = pick_e["node"]
+		pb.visible = false
+		_race_picker_btns.append(pb)
+		_race_picker_labels.append(pick_e["label"])
+
 	_race_rows_label = _panel_label("", 14, Color(0.85, 0.92, 1.0, 0.95), 4)
 	_race_rows_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_race_rows_label.position = Vector3(-size_x * 0.5 + 0.04, -0.16, 0.006)
@@ -3593,9 +3619,49 @@ func _race_gp_join() -> void:
 	_race_listen = PacketPeerUDP.new()
 	_race_listen.bind(RACE_BCAST_PORT)
 	_race_search_t = RACE_LAN_SEARCH_TIMEOUT
+	_race_discovered_hosts.clear()
+	_race_discovery_order.clear()
+	_race_refresh_picker()
 	_apply_score(_player_initials, 0)
 	_race_set_status("SEARCHING (LAN)…")
 	_race_update_button_visibility()
+
+# Show/hide + label the up-to-RACE_MAX_DISCOVERED picker buttons from the current discovery
+# list. Called whenever a new host is heard, and on join/leave to reset the slots.
+func _race_refresh_picker() -> void:
+	for i in range(_race_picker_btns.size()):
+		var pb: Node3D = _race_picker_btns[i]
+		if pb == null:
+			continue
+		if i < _race_discovery_order.size():
+			var ip: String = _race_discovery_order[i]
+			var tag: String = String(_race_discovered_hosts.get(ip, {}).get("tag", "???"))
+			pb.visible = true
+			var lbl: Label3D = _race_picker_labels[i]
+			if lbl != null:
+				lbl.text = tag
+		else:
+			pb.visible = false
+	if _race_discovery_order.size() == 1:
+		_race_set_status("FOUND 1 HOST — pick to join")
+	elif _race_discovery_order.size() > 1:
+		_race_set_status("FOUND %d HOSTS — pick one to join" % _race_discovery_order.size())
+
+# Poke callback for picker slot `slot` — connect to whichever host is currently in that slot.
+func _race_gp_pick_host(slot: int) -> void:
+	if not _race_searching or slot >= _race_discovery_order.size():
+		return
+	var ip: String = _race_discovery_order[slot]
+	if _race_listen != null:
+		_race_listen.close(); _race_listen = null
+	_race_searching = false
+	_race_peer = ENetMultiplayerPeer.new()
+	_race_peer.create_client(ip, RACE_PORT)
+	multiplayer.multiplayer_peer = _race_peer
+	_race_set_status("JOINING (LAN)…")
+	for pb in _race_picker_btns:
+		if pb != null:
+			pb.visible = false
 
 func _race_gp_leave() -> void:
 	var was_active := _race_hosting or _race_client or _race_searching \
@@ -3622,6 +3688,11 @@ func _race_gp_leave() -> void:
 	_race_relay_connecting = false
 	_race_relay_peer_joined = false
 	_race_relay_id = ""
+	_race_discovered_hosts.clear()
+	_race_discovery_order.clear()
+	for pb in _race_picker_btns:
+		if pb != null:
+			pb.visible = false
 	_race_scores.clear()
 	_race_clear_remote_visuals()
 	if _race_rows_label != null:
@@ -4006,17 +4077,26 @@ func _race_process(delta: float) -> void:
 
 	# Client: listen for the beacon; fall back to the relay after the timeout.
 	if _race_searching:
-		if _race_listen != null and _race_listen.get_available_packet_count() > 0:
+		# Collect EVERY distinct host heard (there can be more than one beaconing on the same
+		# LAN) rather than auto-connecting to whichever answers first — see _race_gp_pick_host.
+		var heard_new := false
+		while _race_listen != null and _race_listen.get_available_packet_count() > 0:
 			var pkt := _race_listen.get_packet().get_string_from_utf8()
 			var ip := _race_listen.get_packet_ip()
-			if pkt.begins_with("CASCADE_RACE_HOST"):
-				_race_listen.close(); _race_listen = null
-				_race_searching = false
-				_race_peer = ENetMultiplayerPeer.new()
-				_race_peer.create_client(ip, RACE_PORT)
-				multiplayer.multiplayer_peer = _race_peer
-				_race_set_status("JOINING (LAN)…")
-		else:
+			if not pkt.begins_with("CASCADE_RACE_HOST"):
+				continue
+			var tag := pkt.get_slice("|", 1) if pkt.count("|") > 0 else "???"
+			if not _race_discovered_hosts.has(ip):
+				if _race_discovery_order.size() < RACE_MAX_DISCOVERED:
+					_race_discovery_order.append(ip)
+					heard_new = true
+			_race_discovered_hosts[ip] = {"tag": tag, "last_seen_ms": Time.get_ticks_msec()}
+		if heard_new:
+			_race_refresh_picker()
+		# Only count down to the relay fallback while NOTHING has been found yet — once a host
+		# is on the picker, stay put and let the player choose rather than yanking them onto the
+		# relay mid-decision.
+		if _race_discovered_hosts.is_empty():
 			_race_search_t -= delta
 			if _race_search_t <= 0.0:
 				if _race_listen != null:
