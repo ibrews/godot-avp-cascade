@@ -34,9 +34,33 @@ var follow_suspended := false
 # External two-hand control (main_v2 scale): while true the driver owns the transform; the one-hand
 # follow is suspended and the body frozen so physics can't fight it.
 var two_hand := false
-var _saved_collision_layer := 0
-var _saved_collision_mask := 0
 var _two_hand_follow_was_on := true
+
+# Collision must be OFF for the whole time an object is being moved/scaled by hand — one-hand
+# grab AND two-hand scale both suppress it (see _suppress_collision/_restore_collision), so a
+# held object can be dragged through panels/other grabbables without the physics solver fighting
+# the follow. Reference-counted via _collision_suppressed rather than each caller saving/restoring
+# independently, since one-hand-hold and two-hand-scale can overlap (second hand joins mid-grab) —
+# a naive save/restore in both places would let the inner one clobber the outer one's saved value.
+var _collision_suppressed := false
+var _true_collision_layer := 0
+var _true_collision_mask := 0
+
+func _suppress_collision() -> void:
+	if _collision_suppressed:
+		return
+	_true_collision_layer = collision_layer
+	_true_collision_mask = collision_mask
+	collision_layer = 0
+	collision_mask = 0
+	_collision_suppressed = true
+
+func _restore_collision() -> void:
+	if not _collision_suppressed:
+		return
+	collision_layer = _true_collision_layer
+	collision_mask = _true_collision_mask
+	_collision_suppressed = false
 
 var original_parent : Node3D
 var _saved_freeze_mode : int = FREEZE_MODE_STATIC   # resting freeze mode, restored on release
@@ -194,6 +218,7 @@ func pick_up(pick_up_by) -> void:
 	_saved_freeze_mode = freeze_mode
 	freeze_mode = FREEZE_MODE_STATIC
 	freeze = true
+	_suppress_collision()   # a held object must never fight the physics solver while it's dragged
 	_pos_history.clear()
 	_update_highlight()
 
@@ -235,6 +260,8 @@ func let_go() -> void:
 	global_transform = current_transform
 
 	freeze_mode = _saved_freeze_mode   # restore resting freeze (e.g. KINEMATIC obstacles)
+	if not two_hand:
+		_restore_collision()   # only the OUTERMOST release re-enables collision (see _restore_collision)
 	if freeze_on_release:
 		freeze = true   # stay where dropped (plates/wall)
 	else:
@@ -268,18 +295,15 @@ func set_two_hand(on: bool) -> void:
 	if on:
 		freeze_mode = FREEZE_MODE_STATIC
 		freeze = true
-		_saved_collision_layer = collision_layer
-		_saved_collision_mask = collision_mask
-		collision_layer = 0
-		collision_mask = 0
+		_suppress_collision()
 		if picked_up_by != null:
 			_two_hand_follow_was_on = bool(picked_up_by.get("follow_fingertips"))
 			picked_up_by.set("follow_fingertips", false)
 	else:
 		if picked_up_by != null:
 			picked_up_by.set("follow_fingertips", _two_hand_follow_was_on)
-		collision_layer = _saved_collision_layer
-		collision_mask = _saved_collision_mask
+		if not is_picked_up():
+			_restore_collision()   # only the OUTERMOST release re-enables collision
 		freeze = true if freeze_on_release else false
 		_follow_ready = false   # re-seed the follow from the current pose
 	_update_highlight()

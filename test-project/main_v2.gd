@@ -367,7 +367,14 @@ var _race_start_btn_node: Node3D
 # physics/transform authority: purely a cosmetic mirror driven by periodic
 # state snapshots. See the "MULTIPLAYER RACE" section for the implementation.
 const REMOTE_STATE_HZ := 8.0
-const REMOTE_OFFSET := Vector3(1.8, 0.0, 0.0)   # "their side" — clear of every panel's ±0.5m
+# Placed diagonally forward-right (not purely to the side): both racers were applying this SAME
+# offset to what they received, so both ended up seeing the other player "on my right, facing the
+# same way I am" — never each other. There's no shared coordinate space to compute real eye
+# contact from, so this is a fixed, symmetric illusion: everyone's ghost renders forward-and-right
+# of them, ROTATED 180° (see _race_mirror_point/_race_mirror_rot) so it visually faces back toward
+# the viewer instead of facing away with them — the "sitting across a table" trick. Clear of every
+# panel's ±0.5m and short of the FORWARD_Z=-1.3 cascade stage so the ghost doesn't render inside it.
+const REMOTE_OFFSET := Vector3(1.6, 0.0, -0.9)
 const REMOTE_STALE_MS := 2500                   # no update this long → hide the ghost racer
 const REMOTE_CUBE_LERP_RATE := 10.0             # per-second lerp toward the last received cube pos
 
@@ -377,6 +384,7 @@ var _race_remote_head_mesh: MeshInstance3D
 var _race_remote_hand_trackers := {}   # "left"/"right" -> XRHandTracker (synthetic, network-fed)
 var _race_remote_hand_drivers := {}    # "left"/"right" -> HandMeshDriver3D
 var _race_ghost_cubes := {}            # cube id (String) -> MeshInstance3D
+var _race_remote_head_raw_p := Vector3.ZERO   # this frame's un-mirrored sender head pos, for hand-joint pivoting
 var _race_remote_last_update_ms := {}  # tag -> Time.get_ticks_msec() of last state received
 
 # ============================================================================
@@ -2073,6 +2081,17 @@ func _cancel_round() -> void:
 	tw.tween_property(_start_button_mat, "emission", Color(0.20, 0.95, 0.45), 0.45)
 
 func _start_round() -> void:
+	# Despawn any cubes still alive from the PREVIOUS round (resting on a surface, never scored,
+	# never fell into the kill volume) — neither the goal nor the kill zone catches every cube, and
+	# leftovers were never cleared here before. They'd silently accumulate round after round until
+	# _active_cubes hit MAX_CUBES and the spawner (gated on _active_cubes.size() < MAX_CUBES in
+	# _process) stopped firing for good. Rare in solo play (few rounds per launch); reliably hit in
+	# a multiplayer session, which chains many rematches back-to-back — this is Alasdair's "spawner
+	# sometimes stops" report.
+	for c in _active_cubes:
+		if is_instance_valid(c):
+			c.queue_free()
+	_active_cubes.clear()
 	_timer_active = true
 	_timer_remaining = ROUND_SECONDS
 	_round_score = 0
@@ -3784,6 +3803,20 @@ func _race_ensure_remote_visuals() -> void:
 		_race_remote_container.add_child(driver)
 		_race_remote_hand_drivers[side] = driver
 
+# Rotate the sender's raw skeleton 180° around its OWN head position (a vertical-axis yaw, so it
+# stays anatomically correct — a rotation, not a mirror reflection), THEN translate the whole
+# rotated body to REMOTE_OFFSET. A joint at the sender's head position is unaffected (rel=0); a
+# joint out in front of the sender's head (hands raised toward the stage they're facing) ends up
+# BEHIND the ghost's rendered head instead — i.e. reaching toward the viewer. Combined with
+# _race_mirror_rot on every joint's own orientation, the whole ghost turns to face back at you.
+const _MIRROR_YAW := Basis(Vector3.UP, PI)
+
+func _race_mirror_point(raw_p: Vector3, head_p: Vector3) -> Vector3:
+	return _MIRROR_YAW * (raw_p - head_p) + head_p + REMOTE_OFFSET
+
+func _race_mirror_rot(q: Quaternion) -> Quaternion:
+	return _MIRROR_YAW.get_rotation_quaternion() * q
+
 func _race_apply_hand_joints(side: String, joints) -> void:
 	var t: XRHandTracker = _race_remote_hand_trackers.get(side)
 	if t == null:
@@ -3797,16 +3830,20 @@ func _race_apply_hand_joints(side: String, joints) -> void:
 		if not (jd is Array) or jd.size() < 7:
 			t.set_hand_joint_flags(j, 0)
 			continue
-		var p := Vector3(jd[0], jd[1], jd[2]) + REMOTE_OFFSET
-		var q := Quaternion(jd[3], jd[4], jd[5], jd[6])
+		var raw_p := Vector3(jd[0], jd[1], jd[2])
+		var raw_q := Quaternion(jd[3], jd[4], jd[5], jd[6])
+		var p := _race_mirror_point(raw_p, _race_remote_head_raw_p)
+		var q := _race_mirror_rot(raw_q)
 		t.set_hand_joint_transform(j, Transform3D(Basis(q), p))
 		t.set_hand_joint_flags(j, 8)
 
 func _race_update_remote_head(head: Dictionary) -> void:
 	var p: Array = head.get("p", [0.0, 0.0, 0.0])
 	var q: Array = head.get("q", [0.0, 0.0, 0.0, 1.0])
-	var pos := Vector3(p[0], p[1], p[2]) + REMOTE_OFFSET
-	var quat := Quaternion(q[0], q[1], q[2], q[3])
+	var raw_p := Vector3(p[0], p[1], p[2])
+	_race_remote_head_raw_p = raw_p   # hand joints (applied right after, same payload) pivot on this
+	var pos := _race_mirror_point(raw_p, raw_p)   # a point AT the pivot is unmoved by the rotation
+	var quat := _race_mirror_rot(Quaternion(q[0], q[1], q[2], q[3]))
 	if _race_remote_head_mesh == null:
 		_race_remote_head_mesh = MeshInstance3D.new()
 		var cap := CapsuleMesh.new()
