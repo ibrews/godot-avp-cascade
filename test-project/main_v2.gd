@@ -11,7 +11,7 @@ extends Node3D
 #   ring→thumb   = reset everything       pinky→thumb  = toggle sky (immersion / passthrough)
 
 # Shown on the in-world info panel; bump on meaningful releases. (Full changelog lives in git log.)
-const APP_VERSION := "v0.9.37-ghostracer"
+const APP_VERSION := "v0.9.38-multiplayer"
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
@@ -401,6 +401,8 @@ var _race_remote_head_mesh: MeshInstance3D
 var _race_remote_score_label: Label3D
 var _race_remote_hand_trackers := {}   # "left"/"right" -> XRHandTracker (synthetic, network-fed)
 var _race_remote_hand_drivers := {}    # "left"/"right" -> HandMeshDriver3D
+var _race_remote_hand_targets := {"left": {}, "right": {}}   # side -> {joint_idx: Transform3D}, last-received (unsmoothed)
+const REMOTE_HAND_LERP_RATE := 12.0    # per-second lerp toward the last received joint pose (~8Hz updates otherwise visibly snap)
 var _race_ghost_cubes := {}            # cube id (String) -> MeshInstance3D
 var _race_remote_head_raw_p := Vector3.ZERO   # this frame's un-mirrored sender head pos, for hand-joint pivoting
 var _race_remote_last_update_ms := {}  # tag -> Time.get_ticks_msec() of last state received
@@ -3929,21 +3931,30 @@ func _race_apply_hand_joints(side: String, joints) -> void:
 	var t: XRHandTracker = _race_remote_hand_trackers.get(side)
 	if t == null:
 		return
+	var targets: Dictionary = _race_remote_hand_targets[side]
 	if not (joints is Array):
 		t.has_tracking_data = false
+		targets.clear()
 		return
 	t.has_tracking_data = true
 	for j in range(26):
 		var jd = joints[j] if j < joints.size() else null
 		if not (jd is Array) or jd.size() < 7:
 			t.set_hand_joint_flags(j, 0)
+			targets.erase(j)
 			continue
 		var raw_p := Vector3(jd[0], jd[1], jd[2])
 		var raw_q := Quaternion(jd[3], jd[4], jd[5], jd[6])
-		var p := _race_mirror_point(raw_p, _race_remote_head_raw_p)
-		var q := _race_mirror_rot(raw_q)
-		t.set_hand_joint_transform(j, Transform3D(Basis(q), p))
+		var xf := Transform3D(Basis(_race_mirror_rot(raw_q)), _race_mirror_point(raw_p, _race_remote_head_raw_p))
+		# Store as the LERP TARGET rather than writing it straight to the tracker — the ~8Hz
+		# update rate would otherwise make every joint visibly snap every ~125ms ("hands are a
+		# little broken" from today's playtest). _race_smooth_remote_hands eases toward this
+		# every frame, same idea as the ghost cubes' own target/lerp split.
+		var first_sight := not targets.has(j)
+		targets[j] = xf
 		t.set_hand_joint_flags(j, 8)
+		if first_sight:
+			t.set_hand_joint_transform(j, xf)   # snap in on first sighting only, not lerp-from-nothing
 
 func _race_update_remote_head(tag: String, head: Dictionary) -> void:
 	var p: Array = head.get("p", [0.0, 0.0, 0.0])
@@ -4031,10 +4042,28 @@ func _race_update_ghost_cubes(cubes: Array) -> void:
 				_race_ghost_cubes[id].queue_free()
 			_race_ghost_cubes.erase(id)
 
+# Per-frame: ease every remote hand joint toward its last-received target (see
+# _race_apply_hand_joints) so the ~8Hz network update rate reads as smooth motion instead of a
+# snap every ~125ms.
+func _race_smooth_remote_hands(delta: float) -> void:
+	var a := clampf(delta * REMOTE_HAND_LERP_RATE, 0.0, 1.0)
+	for side in ["left", "right"]:
+		var t: XRHandTracker = _race_remote_hand_trackers.get(side)
+		if t == null:
+			continue
+		var targets: Dictionary = _race_remote_hand_targets[side]
+		for j in targets:
+			var target: Transform3D = targets[j]
+			var cur := t.get_hand_joint_transform(j)
+			var new_pos := cur.origin.lerp(target.origin, a)
+			var new_rot := cur.basis.get_rotation_quaternion().slerp(target.basis.get_rotation_quaternion(), a)
+			t.set_hand_joint_transform(j, Transform3D(Basis(new_rot), new_pos))
+
 # Per-frame: lerp every ghost cube toward its last received position, and hide
 # the whole ghost racer if its sender hasn't sent a state update in a while
 # (peer left, or simply isn't racing right now).
 func _race_update_remote_ghosts(delta: float) -> void:
+	_race_smooth_remote_hands(delta)
 	for id in _race_ghost_cubes:
 		var mi: MeshInstance3D = _race_ghost_cubes[id]
 		if not is_instance_valid(mi):
@@ -4059,6 +4088,8 @@ func _race_clear_remote_visuals() -> void:
 	_race_ghost_cubes.clear()
 	for side in _race_remote_hand_trackers:
 		(_race_remote_hand_trackers[side] as XRHandTracker).has_tracking_data = false
+	for side in _race_remote_hand_targets:
+		(_race_remote_hand_targets[side] as Dictionary).clear()
 	if _race_remote_head_mesh != null:
 		_race_remote_head_mesh.visible = false
 	if _race_remote_score_label != null:
