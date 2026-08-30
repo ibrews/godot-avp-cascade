@@ -31,6 +31,14 @@ var closest_areas : Array
 # placement, no thumb-drag); a throwable body keeps following position so the throw captures velocity.
 var follow_suspended := false
 
+# Set by the handler EARLIER than follow_suspended — while the pinch is still latched "pressed" by
+# the (deliberately conservative) release-threshold hysteresis, but already opening. Freezes ONLY
+# rotation, never position: most of a release gesture's thumb-swing happens before follow_suspended
+# engages (it doesn't trip until the pinch is ~88% of the way to fully open), so that swing was
+# getting baked into the held orientation. Kept separate from follow_suspended so freeze_on_release
+# bodies still track position for fine placement right up until the existing (later) release point.
+var rotation_locked := false
+
 # External two-hand control (main_v2 scale): while true the driver owns the transform; the one-hand
 # follow is suspended and the body frozen so physics can't fight it.
 var two_hand := false
@@ -170,10 +178,10 @@ func _process(delta: float) -> void:
 	# Clean release: while the pinch is OPEN, never rotate toward the source (the opening hand swings
 	# the thumb — that was the release spin). Hold the current orientation. A place-only body also
 	# holds position; a throwable body keeps following position so the throw gets its velocity.
-	if follow_suspended:
+	if rotation_locked or follow_suspended:
 		target_basis = _filt_basis
-		if freeze_on_release:
-			target_pivot = _filt_pos
+	if follow_suspended and freeze_on_release:
+		target_pivot = _filt_pos
 
 	if not _follow_ready or delta <= 0.0:
 		# Adopt the body's CURRENT scale on every (re)seed so the follow never forces a stale scale,
@@ -253,6 +261,7 @@ func pick_up(pick_up_by) -> void:
 		_grab_rot_offset = Basis.IDENTITY
 		_grab_point_local = Vector3.ZERO
 	follow_suspended = false   # a fresh grab follows actively until the handler reports the pinch open
+	rotation_locked = false
 	_follow_ready = false      # seed the filter from the current pose on the first frame
 
 

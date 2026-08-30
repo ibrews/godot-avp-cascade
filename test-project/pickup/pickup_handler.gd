@@ -18,6 +18,16 @@ class_name PickupHandler3D
 @export var pickup_action : String = "pickup"
 @export var pickup_press_threshold : float = 0.35
 @export var pickup_release_threshold : float = 0.12
+# Rotation-only freeze, EARLIER than pickup_release_threshold. pickup_release_threshold sits so close
+# to full-open (normalized: distance ~22.3mm of a 10-24mm grab-release range) that ~88% of the
+# opening motion — and the thumb rotation that comes with it — happens before follow_suspended ever
+# engages, reading as "the object rotates with my finger as I let go." This threshold drives
+# rotation_locked instead: a separate, earlier signal that only freezes rotation (never position, and
+# never the actual drop timing — pickup_release_threshold/the sticky-release system below are
+# untouched). Hysteresis (freeze/reengage pair) avoids flicker if the pinch value jitters near the
+# freeze point mid-gesture.
+@export var rotation_freeze_threshold : float = 0.55
+@export var rotation_reengage_threshold : float = 0.65
 @export var release_grace_msec : int = 180
 @export var quick_release_value : float = 0.04
 # A "clearly wide-open" pinch must STAY open this long before the quick release fires — a tracking
@@ -36,6 +46,7 @@ var closest_body : PickupAbleBody3D
 var picked_up_body: PickupAbleBody3D
 var was_pickup_pressed : bool = false
 var release_started_msec : int = 0
+var _rotation_locked_latch : bool = false
 
 # EVERY grab anchors right where you grab — no carried-over "grab point" from a previous hold. (A
 # scoped lost-view restore was tried and removed: the hand-tracking VALID/TRACKED flags flicker during
@@ -321,6 +332,17 @@ func _physics_process(_delta) -> void:
 		threshold = pickup_release_threshold if was_pickup_pressed else pickup_press_threshold
 		pickup_pressed = pickup_value > threshold
 		_sample_jitter()   # keep the recent-jitter stability signal warm (the release gate needs it)
+
+	# Earlier, rotation-only freeze — independent of pickup_pressed/pickup_release_threshold so the
+	# sticky-release drop timing below is untouched. Hysteresis (two thresholds) avoids flicker.
+	if picked_up_body:
+		if _rotation_locked_latch:
+			_rotation_locked_latch = pickup_value < rotation_reengage_threshold
+		else:
+			_rotation_locked_latch = pickup_value <= rotation_freeze_threshold
+		picked_up_body.rotation_locked = _rotation_locked_latch
+	else:
+		_rotation_locked_latch = false
 
 	# Do we need to let go?
 	if picked_up_body:
