@@ -354,6 +354,11 @@ var _race_mode := false             # true from GO until the race's _end_round()
 var _race_score_bcast_t := 0.0
 var _race_scores := {}              # tag (String) -> score (int), every known racer incl. self
 
+# Session-long stats (persist across rematches, reset on a fresh HOST/JOIN): cumulative points
+# per tag across every race this session, and the single best round anyone's posted.
+var _race_session_totals := {}      # tag (String) -> total points across every race this session
+var _race_session_high := {"tag": "", "score": -1}   # best single-round score this session
+
 var _race_status_label: Label3D
 var _race_rows_label: Label3D
 var _race_host_btn: Node3D
@@ -393,6 +398,7 @@ const REMOTE_CUBE_LERP_RATE := 10.0             # per-second lerp toward the las
 var _race_state_bcast_t := 0.0
 var _race_remote_container: Node3D
 var _race_remote_head_mesh: MeshInstance3D
+var _race_remote_score_label: Label3D
 var _race_remote_hand_trackers := {}   # "left"/"right" -> XRHandTracker (synthetic, network-fed)
 var _race_remote_hand_drivers := {}    # "left"/"right" -> HandMeshDriver3D
 var _race_ghost_cubes := {}            # cube id (String) -> MeshInstance3D
@@ -2172,6 +2178,12 @@ func _celebrate_high_score(tier: int) -> void:
 	var center := Vector3(0.0, 1.5, -0.6)
 	if cam != null:
 		center = cam.global_position + cam.global_transform.basis.z * -0.6   # ~0.6 m in front
+	_celebrate_at(center, tier)
+
+# Core of the celebration, split out from _celebrate_high_score so a race win can fire it
+# centred on the WINNER (which may be the local player or the ghost racer), not always the
+# camera. See _race_celebrate_winner.
+func _celebrate_at(center: Vector3, tier: int) -> void:
 	# tier 2 (world record) is bigger: more bursts, wider spread, cooler palette.
 	var n_bursts := 9 if tier >= 2 else 6
 	var spread := 1.7 if tier >= 2 else 1.3
@@ -3593,6 +3605,8 @@ func _race_gp_host() -> void:
 	if _race_hosting or _race_client or _race_searching or _race_relay_connecting or _race_relay_up:
 		return
 	_race_scores.clear()
+	_race_session_totals.clear()
+	_race_session_high = {"tag": "", "score": -1}
 	_race_peer = ENetMultiplayerPeer.new()
 	var err := _race_peer.create_server(RACE_PORT, 8)
 	if err != OK:
@@ -3621,6 +3635,8 @@ func _race_gp_join() -> void:
 	_race_search_t = RACE_LAN_SEARCH_TIMEOUT
 	_race_discovered_hosts.clear()
 	_race_discovery_order.clear()
+	_race_session_totals.clear()
+	_race_session_high = {"tag": "", "score": -1}
 	_race_refresh_picker()
 	_apply_score(_player_initials, 0)
 	_race_set_status("SEARCHING (LAN)…")
@@ -3863,7 +3879,7 @@ func _apply_state(tag: String, payload: Dictionary) -> void:
 	_race_remote_last_update_ms[tag] = Time.get_ticks_msec()
 	var head = payload.get("head")
 	if head is Dictionary:
-		_race_update_remote_head(head)
+		_race_update_remote_head(tag, head)
 	_race_apply_hand_joints("left", payload.get("lh"))
 	_race_apply_hand_joints("right", payload.get("rh"))
 	_race_update_ghost_cubes(payload.get("cubes", []))
@@ -3928,7 +3944,7 @@ func _race_apply_hand_joints(side: String, joints) -> void:
 		t.set_hand_joint_transform(j, Transform3D(Basis(q), p))
 		t.set_hand_joint_flags(j, 8)
 
-func _race_update_remote_head(head: Dictionary) -> void:
+func _race_update_remote_head(tag: String, head: Dictionary) -> void:
 	var p: Array = head.get("p", [0.0, 0.0, 0.0])
 	var q: Array = head.get("q", [0.0, 0.0, 0.0, 1.0])
 	var raw_p := Vector3(p[0], p[1], p[2])
@@ -3952,6 +3968,15 @@ func _race_update_remote_head(head: Dictionary) -> void:
 		_race_remote_container.add_child(_race_remote_head_mesh)
 	_race_remote_head_mesh.visible = true
 	_race_remote_head_mesh.global_transform = Transform3D(Basis(quat), pos)
+	# Live score floating above the ghost's head — "shapes falling for each other but not the
+	# full setup with points" was the gap: you could see their cascade but not how they were
+	# doing. _race_scores is already kept current via the score broadcast during racing.
+	if _race_remote_score_label == null:
+		_race_remote_score_label = _panel_label("", 26, Color(1.0, 0.92, 0.55, 0.95), 6)
+		_race_remote_container.add_child(_race_remote_score_label)
+	_race_remote_score_label.visible = true
+	_race_remote_score_label.text = "%s  %d" % [tag, int(_race_scores.get(tag, 0))]
+	_race_remote_score_label.global_transform = Transform3D(Basis(quat), pos + Vector3(0, 0.18, 0))
 
 # Diff the incoming cube list against known ghosts: spawn new ones, free ones
 # no longer present (scored/despawned on the sender's side), and stash a
@@ -4035,6 +4060,8 @@ func _race_clear_remote_visuals() -> void:
 		(_race_remote_hand_trackers[side] as XRHandTracker).has_tracking_data = false
 	if _race_remote_head_mesh != null:
 		_race_remote_head_mesh.visible = false
+	if _race_remote_score_label != null:
+		_race_remote_score_label.visible = false
 	_race_remote_last_update_ms.clear()
 
 func _race_finish_round(final_score: int) -> void:
@@ -4049,8 +4076,52 @@ func _race_finish_round(final_score: int) -> void:
 	_race_show_final_standings()
 
 func _race_show_final_standings() -> void:
+	var rows := _race_sorted_rows()
+	for r in rows:
+		var tag: String = String(r["tag"])
+		var score: int = int(r["score"])
+		_race_session_totals[tag] = int(_race_session_totals.get(tag, 0)) + score
+		if score > int(_race_session_high.get("score", -1)):
+			_race_session_high = {"tag": tag, "score": score}
+	var winner_tag := String(rows[0]["tag"]) if not rows.is_empty() else ""
+	_race_celebrate_winner(winner_tag)
 	_race_refresh_rows_label()
+	if _race_rows_label != null and not rows.is_empty():
+		var extra := "\n%s wins the round!\n" % winner_tag
+		extra += "SESSION HIGH: %s  %d\n" % [String(_race_session_high["tag"]), int(_race_session_high["score"])]
+		var leader := _race_session_leader()
+		if leader != "":
+			extra += "SESSION LEADER: %s  %d pts total" % [leader, int(_race_session_totals.get(leader, 0))]
+		_race_rows_label.text += extra
 	_race_set_status("RACE RESULTS — poke START RACE for a rematch")
+
+# Tag with the highest _race_session_totals (cumulative points across every race since HOST/
+# JOIN this session), or "" if nobody's raced yet.
+func _race_session_leader() -> String:
+	var best_tag := ""
+	var best: int = -1
+	for tag in _race_session_totals:
+		var v: int = int(_race_session_totals[tag])
+		if v > best:
+			best = v
+			best_tag = tag
+	return best_tag
+
+# Fireworks over whoever just won — centred on the local player if it was them, or on the
+# ghost racer's rendered head if it was the other racer. If the winner isn't currently visible
+# (e.g. they already left after the round ended), skip rather than guess at a position.
+func _race_celebrate_winner(winner_tag: String) -> void:
+	if winner_tag == "":
+		return
+	var center: Vector3
+	if winner_tag == _player_initials:
+		var cam := get_viewport().get_camera_3d()
+		center = (cam.global_position + cam.global_transform.basis.z * -0.6) if cam != null else Vector3(0, 1.5, -0.6)
+	elif _race_remote_head_mesh != null and _race_remote_head_mesh.visible:
+		center = _race_remote_head_mesh.global_position
+	else:
+		return
+	_celebrate_at(center, 1)
 
 func _show_countdown_number(txt: String) -> void:
 	var cam := get_viewport().get_camera_3d()
