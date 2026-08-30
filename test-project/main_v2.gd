@@ -11,7 +11,7 @@ extends Node3D
 #   ring→thumb   = reset everything       pinky→thumb  = toggle sky (immersion / passthrough)
 
 # Shown on the in-world info panel; bump on meaningful releases. (Full changelog lives in git log.)
-const APP_VERSION := "v0.9.38-multiplayer"
+const APP_VERSION := "v0.9.38-mp-b12"
 
 # Sky materialize/dissolve transition length (seconds). The shader "dissolve" uniform
 # tween AND the dissolve sound are BOTH driven from this one constant, so they always
