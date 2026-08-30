@@ -1052,6 +1052,7 @@ func _process(delta: float):
 	_update_poke_buttons(delta)
 	_update_leaderboard(delta)
 	_race_process(delta)
+	_update_high_five(delta)
 	_update_destruct(delta)
 	_update_grab_sound()
 	_update_two_hand_scale()  # both hands pinch → scale world (handle) or held object
@@ -4063,6 +4064,60 @@ func _race_clear_remote_visuals() -> void:
 	if _race_remote_score_label != null:
 		_race_remote_score_label.visible = false
 	_race_remote_last_update_ms.clear()
+
+# ============================================================================
+# HIGH FIVE — a local fingertip meeting the ghost racer's fingertip. Cosmetic-only burst
+# (the "explosion of a panel" look, via the same _shard_burst the panel self-destruct uses) —
+# hands themselves stay put. TWO high fives within HIGH_FIVE_DOUBLE_WINDOW is the easter egg:
+# the local hand MESHES genuinely dissolve (HandMeshDriver3D's own particle burst, same one
+# the HANDS-mode toggle uses), and stay gone until the player pokes HANDS to cycle modes again
+# — _apply_hand_visibility() re-syncs every driver's shown state from _hand_mesh_visible on
+# every cycle, so that's the only thing that brings them back; no separate "exploded" flag needed.
+# ============================================================================
+const HIGH_FIVE_DIST := 0.12          # metres between fingertips to count as a touch
+const HIGH_FIVE_COOLDOWN := 1.0       # can't re-trigger for this long after one fires
+const HIGH_FIVE_DOUBLE_WINDOW := 2.0  # a 2nd high five within this long of the 1st = easter egg
+
+var _high_five_cooldown := 0.0
+var _high_five_count := 0
+var _high_five_window_t := 0.0
+
+func _update_high_five(delta: float) -> void:
+	_high_five_cooldown = maxf(0.0, _high_five_cooldown - delta)
+	if _high_five_window_t > 0.0:
+		_high_five_window_t -= delta
+		if _high_five_window_t <= 0.0:
+			_high_five_count = 0
+	if _race_remote_container == null or _high_five_cooldown > 0.0 or _manipulating():
+		return
+	var idx := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+	for local_side in ["left_hand", "right_hand"]:
+		var lp = _index_tip_world(local_side)
+		if lp == null:
+			continue
+		for remote_side in ["left", "right"]:
+			var rt: XRHandTracker = _race_remote_hand_trackers.get(remote_side)
+			if rt == null or not rt.get_has_tracking_data():
+				continue
+			if not (int(rt.get_hand_joint_flags(idx)) & 8):  # POSITION_TRACKED
+				continue
+			var rp: Vector3 = rt.get_hand_joint_transform(idx).origin   # already world-space, see _race_apply_hand_joints
+			if (lp as Vector3).distance_to(rp) <= HIGH_FIVE_DIST:
+				_on_high_five(((lp as Vector3) + rp) * 0.5)
+				return
+
+func _on_high_five(at: Vector3) -> void:
+	_high_five_cooldown = HIGH_FIVE_COOLDOWN
+	_high_five_count += 1
+	_high_five_window_t = HIGH_FIVE_DOUBLE_WINDOW
+	_shard_burst(at, 0.16, Color(1.0, 0.85, 0.30), true, 20)
+	_spawn_burst(at, Color(1.0, 0.75, 0.25))
+	_push_chime(880.0, 0.12, true)
+	if _high_five_count >= 2:
+		_high_five_count = 0
+		_high_five_window_t = 0.0
+		for d in _hand_drivers:
+			d.set_shown(false)   # easter egg: genuinely dissolves the mesh — cycle HANDS to bring it back
 
 func _race_finish_round(final_score: int) -> void:
 	_race_mode = false
