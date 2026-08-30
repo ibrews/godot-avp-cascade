@@ -62,6 +62,23 @@ func _restore_collision() -> void:
 	collision_mask = _true_collision_mask
 	_collision_suppressed = false
 
+# Collision was OFF the whole time this body was held/dragged, so it's easy to end up genuinely
+# overlapping something at the release pose without any feedback that it happened. Restoring
+# collision right as the body is about to unfreeze lets the physics solver "pop" it out on the
+# very next tick — which reads as the object snapping to a different ROTATION than it had at the
+# moment of release, since the solver's depenetration response isn't position-only. Call this
+# right after _restore_collision(), still while frozen: test_move's built-in recovery pass finds
+# any starting overlap and reports the push-out it computed, which we apply as a POSITION-only
+# nudge (rotation left exactly as released) so there's nothing left for the solver to correct.
+const _RELEASE_RECOVERY_MAX := 0.15   # metres — safety clamp; a bigger "recovery" means something
+                                       # is wrong, and nudging further would be worse than leaving it
+func _resolve_release_overlap() -> void:
+	var kc := KinematicCollision3D.new()
+	if test_move(global_transform, Vector3.ZERO, kc, 0.001, true):
+		var travel := kc.get_travel()
+		if travel.length() <= _RELEASE_RECOVERY_MAX:
+			global_position += travel
+
 var original_parent : Node3D
 var _saved_freeze_mode : int = FREEZE_MODE_STATIC   # resting freeze mode, restored on release
 
@@ -262,6 +279,7 @@ func let_go() -> void:
 	freeze_mode = _saved_freeze_mode   # restore resting freeze (e.g. KINEMATIC obstacles)
 	if not two_hand:
 		_restore_collision()   # only the OUTERMOST release re-enables collision (see _restore_collision)
+		_resolve_release_overlap()
 	if freeze_on_release:
 		freeze = true   # stay where dropped (plates/wall)
 	else:
@@ -304,6 +322,7 @@ func set_two_hand(on: bool) -> void:
 			picked_up_by.set("follow_fingertips", _two_hand_follow_was_on)
 		if not is_picked_up():
 			_restore_collision()   # only the OUTERMOST release re-enables collision
+			_resolve_release_overlap()
 		freeze = true if freeze_on_release else false
 		_follow_ready = false   # re-seed the follow from the current pose
 	_update_highlight()

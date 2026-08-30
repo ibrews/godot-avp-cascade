@@ -3510,7 +3510,9 @@ func _race_update_button_visibility() -> void:
 func _build_race_panel() -> void:
 	var root := PickupAbleBody3D.new()
 	root.name = "RacePanel"
-	root.position = Vector3(-0.5, 0.70, -0.5)   # below the control panel, left side
+	root.position = Vector3(-0.5, 1.05, -0.85)   # left side, staggered back in Z from the control
+	# panel so it doesn't visually overlap it despite a similar height band (was Y=0.70 — too low
+	# to reach comfortably; raised to roughly match the tag panel's height on the other side)
 	root.collision_layer = LAYER_GRAB_ONLY
 	root.collision_mask = 0
 	root.freeze = true
