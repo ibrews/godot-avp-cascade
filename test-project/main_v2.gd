@@ -273,6 +273,7 @@ var _tag_slot_underlines: Array[MeshInstance3D] = []  # highlights which slot po
 var _active_tag_slot := 0                      # which of the 3 slots the next letter-poke fills
 var _timer_active := false
 var _timer_remaining := 0.0
+var _end_countdown_last_shown := 0   # 5-4-3-2-1 as the round runs out; edge-detect like the race start countdown
 var _round_score := 0
 var _best_score := 0
 # Type of the last object scored in the goal: -1 none yet, 0 cube, 1 sphere. Drives the
@@ -1633,6 +1634,14 @@ func _push_sweep(f0: float, f1: float, dur: float):
 		var s := sin(phase) * env * 0.38
 		_audio_playback.push_frame(Vector2(s, s))
 
+# Multiplayer join/leave cues — same _push_sweep() the round-start chirp already uses, just
+# pitched up (arriving) vs down (departing) so the two are unmistakable apart.
+func _push_join_chime() -> void:
+	_push_sweep(500.0, 1400.0, 0.22)
+
+func _push_leave_chime() -> void:
+	_push_sweep(1000.0, 400.0, 0.22)
+
 # Powerful score sound to match the fireworks: a deep pitch-dropping boom + a
 # noise crack + a sparkle shimmer tail, with the rising C-E-G arpeggio layered on
 # top. Mixed into ONE buffer fill (needs buffer_length >= ~0.55s).
@@ -2020,6 +2029,12 @@ func _update_timer(delta: float) -> void:
 		if _race_score_bcast_t <= 0.0:
 			_race_score_bcast_t = 1.0 / RACE_SCORE_HZ
 			_race_broadcast_my_score()
+	# 5-4-3-2-1 as the round runs out — solo and race both, same big-number popup the race
+	# start countdown uses. Edge-detected on the integer second so it fires once each.
+	var secs_left := int(ceil(_timer_remaining))
+	if secs_left != _end_countdown_last_shown and secs_left > 0 and secs_left <= 5:
+		_end_countdown_last_shown = secs_left
+		_show_countdown_number(str(secs_left))
 	if _timer_remaining <= 0.0:
 		_end_round()
 
@@ -2094,6 +2109,7 @@ func _start_round() -> void:
 	_active_cubes.clear()
 	_timer_active = true
 	_timer_remaining = ROUND_SECONDS
+	_end_countdown_last_shown = 999   # re-arm the 5-4-3-2-1 end-of-round countdown for this round
 	_round_score = 0
 	_last_goal_sphere = -1   # fresh mix-bonus chain each round
 	_bed_time = 0.0   # restart the music bed at beat 0
@@ -3582,6 +3598,10 @@ func _race_gp_join() -> void:
 	_race_update_button_visibility()
 
 func _race_gp_leave() -> void:
+	var was_active := _race_hosting or _race_client or _race_searching \
+		or _race_relay_connecting or _race_relay_up
+	if was_active:
+		_push_leave_chime()
 	_race_hosting = false
 	_race_client = false
 	_race_searching = false
@@ -3961,7 +3981,7 @@ func _race_show_final_standings() -> void:
 	_race_refresh_rows_label()
 	_race_set_status("RACE RESULTS — poke START RACE for a rematch")
 
-func _race_show_countdown_number(txt: String) -> void:
+func _show_countdown_number(txt: String) -> void:
 	var cam := get_viewport().get_camera_3d()
 	var pos := Vector3(0, 1.6, -0.9)
 	if cam != null:
@@ -4014,14 +4034,14 @@ func _race_process(delta: float) -> void:
 		var secs := int(ceil(remaining_ms / 1000.0))
 		if secs != _race_countdown_last_shown and secs > 0 and secs <= 3:
 			_race_countdown_last_shown = secs
-			_race_show_countdown_number(str(secs))
+			_show_countdown_number(str(secs))
 		if remaining_ms <= 0:
 			_race_countdown_active = false
 			_race_mode = true
 			_race_score_bcast_t = 0.0
 			_race_state_bcast_t = 0.0
 			_start_round()
-			_race_show_countdown_number("GO!")
+			_show_countdown_number("GO!")
 			_race_set_status("RACING…")
 			_race_update_start_button_visibility()
 
@@ -4038,17 +4058,20 @@ func _race_process(delta: float) -> void:
 func _on_race_peer_connected(_id: int) -> void:
 	if _race_hosting:
 		_race_set_status("PLAYER JOINED (LAN) — ready to start")
+		_push_join_chime()
 		_race_update_start_button_visibility()
 
 func _on_race_peer_disconnected(_id: int) -> void:
 	if _race_hosting:
 		_race_set_status("PLAYER LEFT")
+		_push_leave_chime()
 		_race_update_start_button_visibility()
 
 func _on_race_connected_to_server() -> void:
 	if _race_client:
 		_race_enet_up = true
 		_race_set_status("CONNECTED (LAN) — waiting for host to start")
+		_push_join_chime()
 		_race_update_button_visibility()
 
 func _on_race_connection_failed() -> void:
@@ -4061,6 +4084,7 @@ func _on_race_connection_failed() -> void:
 func _on_race_server_disconnected() -> void:
 	if _race_client:
 		_race_enet_up = false
+		_push_leave_chime()
 		multiplayer.multiplayer_peer = null
 		_race_peer = null
 		_race_set_status("HOST DISCONNECTED")
@@ -4126,10 +4150,13 @@ func _race_relay_recv(msg: Dictionary) -> void:
 			_race_relay_peer_joined = roster.size() > 0
 			_race_set_status("CONNECTED (relay) — waiting for host to start" if not _race_hosting \
 				else "CONNECTED (relay) — waiting for a racer")
+			if not _race_hosting and _race_relay_peer_joined:
+				_push_join_chime()   # a client's own "welcome" into an already-occupied room = I just joined
 			_race_update_start_button_visibility()
 		"join":
 			_race_relay_peer_joined = true
 			_race_set_status("PLAYER JOINED (relay) — ready to start" if _race_hosting else "PLAYER JOINED (relay)")
+			_push_join_chime()
 			_race_update_start_button_visibility()
 		"full":
 			_race_set_status("RELAY ROOM FULL — try again later")
@@ -4147,6 +4174,7 @@ func _race_relay_recv(msg: Dictionary) -> void:
 		"leave", "host_left":
 			_race_relay_peer_joined = false
 			_race_set_status("OTHER PLAYER LEFT")
+			_push_leave_chime()
 			_race_update_start_button_visibility()
 		_:
 			pass
