@@ -2,7 +2,7 @@
 
 **Cascade Countdown** — a hand-tracked physics arcade game for Apple Vision Pro, built on the Godot game engine via Apple's official upstream visionOS XR contribution (PR [#109975](https://github.com/godotengine/godot/pull/109975)).
 
-> ⚠️ **Not affiliated with the Godot Foundation.** Cascade Countdown is an independent app by Alex Coulombe. It is built *with* the open-source Godot engine but is **not** created, published, endorsed, or sponsored by the Godot Foundation. "Godot" is a trademark of the Godot Foundation.
+> ⚠️ **Not affiliated with the Godot Foundation.** Cascade Countdown is an independent app by Alex Coulombe Presents. It is built *with* the open-source Godot engine but is **not** created, published, endorsed, or sponsored by the Godot Foundation. "Godot" is a trademark of the Godot Foundation.
 
 Emissive cubes — 8-colour fire-plasma palette, randomised sizes — cascade down through spinning bumpers and a prism splitter onto tilted catch plates in your immersive space. Reach in and **pinch to grab and throw** any cube into the goal ring; keep them alive and bouncing to rack up points, then poke **START** for a 30-second countdown time-attack with a procedural soundtrack. Every collision is a synthesized chime pitch-snapped to the key, so the chaos harmonises into a tune. Walk around it.
 
@@ -249,7 +249,7 @@ In mixed immersion, visionOS CompositorServices requires **alpha == 0 wherever d
 - Engine: [Godot](https://godotengine.org/) — open source
 - visionOS XR port: [Ricardo Sanchez-Saez @ Apple](https://github.com/rsanchezsaez) + community contributors (huisedenanhai, stuartcarnie, BastiaanOlij)
 - **Hand tracking pickup system:** [James Clancey](https://github.com/Clancey) — `PickupHandler3D` / `PickupAbleBody3D` from [Clancey's hand-tracking fork](https://github.com/Clancey/godot/tree/visionos_master_pr)
-- Cascade Countdown game + writeup: [Alex Coulombe (@ibrews)](https://github.com/ibrews)
+- Cascade Countdown game + writeup: [Alex Coulombe Presents (@ibrews)](https://github.com/ibrews)
 
 ## License
 
