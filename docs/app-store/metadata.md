@@ -24,7 +24,7 @@ Recommended: **#2** (most descriptive for search; "hand-tracked" and "physics" a
 ## Promotional Text (≤170 chars, editable without re-review)
 
 ```
-30 seconds. 8-colour plasma cubes cascading through your room. Pinch any one mid-air and throw it through the goal ring. Procedural soundtrack rises with the chaos.
+30 seconds. 8 objects cascading through your room. Pinch mid-air and throw it through the goal ring or engineer clean drops. Procedural soundtrack rises with the chaos.
 ```
 *168 chars*
 
